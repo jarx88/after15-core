@@ -61,7 +61,7 @@ after15
 Wyswietla:
 - Szczegoly dzienne z typem zmiany
 - Statystyki miesieczne
-- Podzial na projekty z wyliczeniem PLN
+- Podzial na projekty
 
 ### Kompaktowy widok (statusbar)
 
@@ -111,12 +111,6 @@ Utworz plik `~/.config/after15/config.json`:
 
 ```json
 {
-  "salary": {
-    "base_monthly_net": 8000.0,
-    "hours_per_month": 168.0,
-    "overtime_multiplier_weekday": 1.5,
-    "overtime_multiplier_weekend": 2.0
-  },
   "projects": {
     "tracked_path": "Programowanie",
     "excluded_projects": ["sandbox", "test-project"]
@@ -128,10 +122,6 @@ Utworz plik `~/.config/after15/config.json`:
 
 | Pole | Opis | Domyslnie |
 |------|------|-----------|
-| `base_monthly_net` | Wynagrodzenie miesieczne netto | 8000 PLN |
-| `hours_per_month` | Standardowy wymiar godzin | 168h |
-| `overtime_multiplier_weekday` | Mnoznik nadgodzin (dzien) | 1.5x |
-| `overtime_multiplier_weekend` | Mnoznik nadgodzin (weekend) | 2.0x |
 | `tracked_path` | Fragment sciezki do projektow | "Programowanie" |
 | `excluded_projects` | Projekty do pominiecia | [] |
 
@@ -176,15 +166,13 @@ Pierwszy cykl zaczyna sie 28.07.2025 - mozesz to zmienic w `src/schedule.rs`.
 
 📁 PROJEKTY - 2026-01 (nadgodzin: 47:30):
 
-╭─────────────────┬────────┬───────┬────────┬──────────╮
-│ Projekt         │  Dzien │  Wknd │  Suma  │      PLN │
-├─────────────────┼────────┼───────┼────────┼──────────┤
-│ farmaster2      │  12:30 │  8:00 │  20:30 │ 1357 PLN │
-│ after15-core    │  15:45 │  4:15 │  20:00 │ 1156 PLN │
-│ side-project    │   5:00 │  2:00 │   7:00 │  476 PLN │
-╰─────────────────┴────────┴───────┴────────┴──────────╯
-
-  💰 Wynagrodzenie: 2989 PLN netto (71 PLN/h dzien, 95 PLN/h weekend)
+╭─────────────────┬────────┬───────┬────────╮
+│ Projekt         │  Dzien │  Wknd │  Suma  │
+├─────────────────┼────────┼───────┼────────┤
+│ farmaster2      │  12:30 │  8:00 │  20:30 │
+│ after15-core    │  15:45 │  4:15 │  20:00 │
+│ side-project    │   5:00 │  2:00 │   7:00 │
+╰─────────────────┴────────┴───────┴────────╯
 ```
 
 ## Struktura projektu
