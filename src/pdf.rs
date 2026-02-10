@@ -13,8 +13,11 @@ use crate::report::normalize_project_name;
 const FONT_DIRS: &[&str] = &[
     "/usr/share/fonts/liberation",
     "/usr/share/fonts/truetype/liberation",
+    "/usr/share/fonts/liberation2",
+    "/usr/share/fonts/truetype/liberation2",
     "/usr/share/fonts/liberation-sans",
     "/usr/share/fonts/truetype/liberation-sans",
+    "/usr/local/share/fonts",
 ];
 
 // Colors (RGB 0-1)
@@ -388,7 +391,13 @@ fn draw_rect(layer: &PdfLayerReference, x: f32, y: f32, w: f32, h: f32, color: (
 }
 
 fn load_font(doc: &PdfDocumentReference, filename: &str) -> Result<IndirectFontRef, String> {
-    for dir in FONT_DIRS {
+    let mut dirs: Vec<String> = FONT_DIRS.iter().map(|d| d.to_string()).collect();
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(format!("{}/.local/share/fonts", home.display()));
+        dirs.push(format!("{}/.fonts", home.display()));
+    }
+
+    for dir in dirs {
         let path = format!("{}/{}", dir, filename);
         if std::path::Path::new(&path).exists() {
             let font_data = std::fs::read(&path)

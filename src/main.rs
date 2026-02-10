@@ -28,6 +28,9 @@ struct Cli {
     #[arg(long, help = "Generate PDF report")]
     pdf: bool,
 
+    #[arg(long, help = "Send PDF report via Telegram")]
+    pdf_telegram: bool,
+
     #[arg(long, help = "Debug output")]
     debug: bool,
 
@@ -89,6 +92,28 @@ fn main() {
     }
 
     archive::archive_overtime(&daily_hours, &daily_projects, cli.debug);
+
+    if cli.pdf_telegram {
+        match pdf::generate_pdf(&daily_projects, &config, cli.month.as_deref()) {
+            Ok(path) => {
+                let (month_label, table) =
+                    build_telegram_month_table(&daily_projects, &config, cli.month.as_deref());
+                let message = format!(
+                    "📄 Raport PDF nadgodzin\n📅 {}\n<pre>{}</pre>",
+                    month_label,
+                    escape_html(&table)
+                );
+                send_telegram_message(&message, &config);
+                let caption = format!("📄 Raport PDF nadgodzin\n📅 {}", month_label);
+                send_telegram_file(&path, &caption, &config);
+            }
+            Err(e) => {
+                eprintln!("[BLAD] {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     if cli.pdf {
         match pdf::generate_pdf(&daily_projects, &config, cli.month.as_deref()) {
@@ -391,7 +416,7 @@ fn auto_telegram_backup(config: &config::Config) {
     let _ = std::fs::write(&marker, &today);
 }
 
-fn send_telegram_backup(config: &config::Config) {
+fn send_telegram_file(path: &std::path::Path, caption: &str, config: &config::Config) {
     use std::process::Command;
 
     if !config.telegram.is_configured() {
@@ -400,34 +425,10 @@ fn send_telegram_backup(config: &config::Config) {
         std::process::exit(1);
     }
 
-    let summary_path = dirs::data_dir()
-        .or_else(|| dirs::home_dir().map(|p| p.join(".local/share")))
-        .map(|p| p.join("claude-overtime/daily_summary.json"));
-
-    let Some(path) = summary_path else {
-        eprintln!("[BŁĄD] Nie można znaleźć daily_summary.json");
-        std::process::exit(1);
-    };
-
     if !path.exists() {
         eprintln!("[BŁĄD] Plik nie istnieje: {}", path.display());
         std::process::exit(1);
     }
-
-    let summary = archive::load_summary();
-    let days_count = summary.days.len();
-    let file_size = std::fs::metadata(&path)
-        .map(|m| {
-            let kb = m.len() as f64 / 1024.0;
-            format!("{:.1} KB", kb)
-        })
-        .unwrap_or_else(|_| "?".to_string());
-    let date_now = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
-
-    let caption = format!(
-        "\u{1F4E6} Backup daily_summary.json\n\u{1F4C5} {}\n\u{1F4CA} Dni: {} | Rozmiar: {}",
-        date_now, days_count, file_size
-    );
 
     let url = format!(
         "https://api.telegram.org/bot{}/sendDocument",
@@ -454,10 +455,7 @@ fn send_telegram_backup(config: &config::Config) {
             if result.status.success() {
                 let body = String::from_utf8_lossy(&result.stdout);
                 if body.contains("\"ok\":true") {
-                    println!(
-                        "Backup wysłany na Telegram ({} dni, {})",
-                        days_count, file_size
-                    );
+                    println!("Wysłano na Telegram: {}", path.display());
                 } else {
                     eprintln!("[BŁĄD] Telegram API zwrócił błąd: {}", body);
                     std::process::exit(1);
@@ -476,4 +474,239 @@ fn send_telegram_backup(config: &config::Config) {
             std::process::exit(1);
         }
     }
+}
+
+fn send_telegram_message(message: &str, config: &config::Config) {
+    use std::process::Command;
+
+    if !config.telegram.is_configured() {
+        eprintln!("[BŁĄD] Telegram nie skonfigurowany w ~/.config/after15/config.json");
+        eprintln!("Dodaj sekcję: \"telegram\": {{ \"bot_token\": \"...\", \"chat_id\": \"...\" }}");
+        std::process::exit(1);
+    }
+
+    let url = format!(
+        "https://api.telegram.org/bot{}/sendMessage",
+        config.telegram.bot_token
+    );
+
+    let output = Command::new("curl")
+        .args([
+            "-s",
+            "-X",
+            "POST",
+            &url,
+            "-F",
+            &format!("chat_id={}", config.telegram.chat_id),
+            "-F",
+            "parse_mode=HTML",
+            "-F",
+            &format!("text={}", message),
+        ])
+        .output();
+
+    match output {
+        Ok(result) => {
+            if result.status.success() {
+                let body = String::from_utf8_lossy(&result.stdout);
+                if !body.contains("\"ok\":true") {
+                    eprintln!("[BŁĄD] Telegram API zwrócił błąd: {}", body);
+                    std::process::exit(1);
+                }
+            } else {
+                eprintln!(
+                    "[BŁĄD] curl zakończył się błędem: {}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("[BŁĄD] Nie można uruchomić curl: {}", e);
+            eprintln!("Zainstaluj curl: sudo apt install curl");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn build_telegram_month_table(
+    daily_projects: &HashMap<chrono::NaiveDate, HashMap<String, jsonl::ProjectHours>>,
+    config: &config::Config,
+    month_filter: Option<&str>,
+) -> (String, String) {
+    let (month_name, year, filtered_dates) =
+        match get_month_info_for_telegram(daily_projects, month_filter) {
+            Ok(info) => info,
+            Err(err) => {
+                return (
+                    month_filter.unwrap_or("bieżący miesiąc").to_string(),
+                    format!("Brak danych: {}", err),
+                )
+            }
+        };
+
+    let tracked_path = &config.projects.tracked_path;
+    let hourly_weekday = config.salary.base_monthly_net / config.salary.hours_per_month
+        * config.salary.overtime_multiplier_weekday;
+    let hourly_weekend = config.salary.base_monthly_net / config.salary.hours_per_month
+        * config.salary.overtime_multiplier_weekend;
+
+    let mut totals: HashMap<String, jsonl::ProjectHours> = HashMap::new();
+    for date in &filtered_dates {
+        if let Some(day_projects) = daily_projects.get(date) {
+            for (proj_name, hours) in day_projects {
+                let normalized = report::normalize_project_name(proj_name, tracked_path);
+                if config.projects.excluded_projects.contains(&normalized) {
+                    continue;
+                }
+                let entry = totals.entry(normalized).or_default();
+                entry.weekday_hours += hours.weekday_hours;
+                entry.weekend_hours += hours.weekend_hours;
+            }
+        }
+    }
+
+    let mut sorted: Vec<_> = totals.iter().collect();
+    sorted.sort_by(|a, b| {
+        let total_a = a.1.weekday_hours + a.1.weekend_hours;
+        let total_b = b.1.weekday_hours + b.1.weekend_hours;
+        total_b.partial_cmp(&total_a).unwrap()
+    });
+
+    let mut rows: Vec<String> = Vec::new();
+    rows.push(format!(
+        "{:20} {:>5} {:>5} {:>5} {:>6}",
+        "Projekt", "D", "Wk", "S", "PLN"
+    ));
+    rows.push("-".repeat(44));
+
+    let mut total_hours = 0.0;
+    let mut total_pln = 0.0;
+
+    for (name, hours) in sorted.iter().take(10) {
+        let day_h = hours.weekday_hours;
+        let wk_h = hours.weekend_hours;
+        let sum = day_h + wk_h;
+        if sum < 0.01 {
+            continue;
+        }
+        let pln = day_h * hourly_weekday + wk_h * hourly_weekend;
+        total_hours += sum;
+        total_pln += pln;
+        rows.push(format!(
+            "{:20} {:>5} {:>5} {:>5} {:>6}",
+            truncate_str(name, 20),
+            report::format_hm(day_h),
+            report::format_hm(wk_h),
+            report::format_hm(sum),
+            format!("{:.0}", pln)
+        ));
+    }
+
+    rows.push("-".repeat(44));
+    rows.push(format!(
+        "{:20} {:>5} {:>5} {:>5} {:>6}",
+        "SUMA",
+        "",
+        "",
+        report::format_hm(total_hours),
+        format!("{:.0}", total_pln)
+    ));
+
+    let label = format!("{} {}", month_name, year);
+    (label, rows.join("\n"))
+}
+
+fn get_month_info_for_telegram(
+    daily_projects: &HashMap<chrono::NaiveDate, HashMap<String, jsonl::ProjectHours>>,
+    month_filter: Option<&str>,
+) -> Result<(String, i32, Vec<chrono::NaiveDate>), String> {
+    let filtered_dates: Vec<chrono::NaiveDate> = if let Some(filter) = month_filter {
+        let parts: Vec<&str> = filter.split('-').collect();
+        if parts.len() != 2 {
+            return Err("Nieprawidłowy format miesiąca (YYYY-MM)".to_string());
+        }
+        let year: i32 = parts[0].parse().map_err(|_| "Nieprawidłowy rok")?;
+        let month: u32 = parts[1].parse().map_err(|_| "Nieprawidłowy miesiąc")?;
+
+        daily_projects
+            .keys()
+            .filter(|d| d.year() == year && d.month() == month)
+            .copied()
+            .collect()
+    } else {
+        let today = chrono::Local::now().date_naive();
+        daily_projects
+            .keys()
+            .filter(|d| d.year() == today.year() && d.month() == today.month())
+            .copied()
+            .collect()
+    };
+
+    if filtered_dates.is_empty() {
+        return Err("Brak danych dla wybranego miesiąca".to_string());
+    }
+
+    let first_date = filtered_dates.iter().min().unwrap();
+    let month_name = match first_date.month() {
+        1 => "styczeń",
+        2 => "luty",
+        3 => "marzec",
+        4 => "kwiecień",
+        5 => "maj",
+        6 => "czerwiec",
+        7 => "lipiec",
+        8 => "sierpień",
+        9 => "wrzesień",
+        10 => "październik",
+        11 => "listopad",
+        12 => "grudzień",
+        _ => "?",
+    }
+    .to_string();
+
+    Ok((month_name, first_date.year(), filtered_dates))
+}
+
+fn truncate_str(value: &str, max_len: usize) -> String {
+    if value.chars().count() <= max_len {
+        value.to_string()
+    } else {
+        format!("{}...", value.chars().take(max_len - 3).collect::<String>())
+    }
+}
+
+fn send_telegram_backup(config: &config::Config) {
+    let summary_path = dirs::data_dir()
+        .or_else(|| dirs::home_dir().map(|p| p.join(".local/share")))
+        .map(|p| p.join("claude-overtime/daily_summary.json"));
+
+    let Some(path) = summary_path else {
+        eprintln!("[BŁĄD] Nie można znaleźć daily_summary.json");
+        std::process::exit(1);
+    };
+
+    let summary = archive::load_summary();
+    let days_count = summary.days.len();
+    let file_size = std::fs::metadata(&path)
+        .map(|m| {
+            let kb = m.len() as f64 / 1024.0;
+            format!("{:.1} KB", kb)
+        })
+        .unwrap_or_else(|_| "?".to_string());
+    let date_now = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+
+    let caption = format!(
+        "\u{1F4E6} Backup daily_summary.json\n\u{1F4C5} {}\n\u{1F4CA} Dni: {} | Rozmiar: {}",
+        date_now, days_count, file_size
+    );
+
+    send_telegram_file(&path, &caption, config);
 }
