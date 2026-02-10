@@ -37,11 +37,27 @@ impl Default for ProjectsConfig {
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
+pub struct TelegramConfig {
+    #[serde(default)]
+    pub bot_token: String,
+    #[serde(default)]
+    pub chat_id: String,
+}
+
+impl TelegramConfig {
+    pub fn is_configured(&self) -> bool {
+        !self.bot_token.is_empty() && !self.chat_id.is_empty()
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct Config {
     #[serde(default)]
     pub salary: SalaryConfig,
     #[serde(default)]
     pub projects: ProjectsConfig,
+    #[serde(default)]
+    pub telegram: TelegramConfig,
 }
 
 impl Config {

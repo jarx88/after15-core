@@ -1,21 +1,25 @@
 use chrono::{Datelike, Local, NaiveDate};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::path::PathBuf;
 
 use crate::jsonl::ProjectHours;
 use crate::schedule::{get_shift_type, ShiftType};
 
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}
+
 #[derive(Serialize, Deserialize, Default)]
 pub struct DailySummaryFile {
     #[serde(default)]
     pub version: u32,
     #[serde(default)]
-    pub days: HashMap<String, DayEntry>,
+    pub days: BTreeMap<String, DayEntry>,
     #[serde(default)]
-    pub months: HashMap<String, MonthEntry>,
+    pub months: BTreeMap<String, MonthEntry>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -26,7 +30,7 @@ pub struct DayEntry {
     #[serde(default)]
     pub processed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub projects: Option<HashMap<String, ProjectHoursEntry>>,
+    pub projects: Option<BTreeMap<String, ProjectHoursEntry>>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -69,8 +73,8 @@ pub fn load_summary() -> DailySummaryFile {
     if !path.exists() {
         return DailySummaryFile {
             version: 2,
-            days: HashMap::new(),
-            months: HashMap::new(),
+            days: BTreeMap::new(),
+            months: BTreeMap::new(),
         };
     }
 
@@ -86,8 +90,8 @@ pub fn load_summary() -> DailySummaryFile {
     if content.trim().is_empty() {
         return DailySummaryFile {
             version: 2,
-            days: HashMap::new(),
-            months: HashMap::new(),
+            days: BTreeMap::new(),
+            months: BTreeMap::new(),
         };
     }
 
@@ -299,8 +303,8 @@ pub fn archive_overtime(
                     (
                         name.clone(),
                         ProjectHoursEntry {
-                            weekday_hours: hours.weekday_hours,
-                            weekend_hours: hours.weekend_hours,
+                            weekday_hours: round2(hours.weekday_hours),
+                            weekend_hours: round2(hours.weekend_hours),
                         },
                     )
                 })
@@ -308,7 +312,7 @@ pub fn archive_overtime(
         });
 
         let entry = DayEntry {
-            hours: *hours,
+            hours: round2(*hours),
             formatted: format_hm(*hours),
             shift: shift_name(shift_type).to_string(),
             processed: true,
@@ -323,7 +327,7 @@ pub fn archive_overtime(
         }
     }
 
-    let mut monthly_totals: HashMap<String, f64> = HashMap::new();
+    let mut monthly_totals: BTreeMap<String, f64> = BTreeMap::new();
     for (date_str, entry) in &summary.days {
         if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
             let month_key = format!("{}-{:02}", date.year(), date.month());
@@ -331,11 +335,12 @@ pub fn archive_overtime(
         }
     }
 
+    summary.months.clear();
     for (month, total) in monthly_totals {
         summary.months.insert(
             month,
             MonthEntry {
-                total_hours: total,
+                total_hours: round2(total),
                 formatted: format_hm(total),
             },
         );
