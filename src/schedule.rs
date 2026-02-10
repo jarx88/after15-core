@@ -1,4 +1,4 @@
-use chrono::{NaiveDate, NaiveTime, DateTime, Local, Datelike, Weekday, Duration};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveTime, Weekday};
 
 const FIRST_AFTERNOON_START: (i32, u32, u32) = (2025, 7, 28);
 const FIRST_AFTERNOON_END: (i32, u32, u32) = (2025, 8, 2);
@@ -8,14 +8,16 @@ pub fn is_afternoon_shift_period(date: NaiveDate) -> bool {
     let first_start = NaiveDate::from_ymd_opt(
         FIRST_AFTERNOON_START.0,
         FIRST_AFTERNOON_START.1,
-        FIRST_AFTERNOON_START.2
-    ).unwrap();
+        FIRST_AFTERNOON_START.2,
+    )
+    .unwrap();
     let first_end = NaiveDate::from_ymd_opt(
         FIRST_AFTERNOON_END.0,
         FIRST_AFTERNOON_END.1,
-        FIRST_AFTERNOON_END.2
-    ).unwrap();
-    
+        FIRST_AFTERNOON_END.2,
+    )
+    .unwrap();
+
     let days_since_first = (date - first_start).num_days();
     if days_since_first >= 0 {
         let cycle_number = days_since_first / CYCLE_LENGTH_DAYS;
@@ -86,7 +88,7 @@ pub fn get_regular_work_window(date: NaiveDate) -> Option<WorkWindow> {
 pub fn is_overtime_hour(dt: DateTime<Local>) -> bool {
     let date = dt.date_naive();
     let time = dt.time();
-    
+
     match get_regular_work_window(date) {
         Some(window) => time < window.start || time >= window.end,
         None => true,
@@ -96,38 +98,38 @@ pub fn is_overtime_hour(dt: DateTime<Local>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_afternoon_shift_first_period() {
         let mon = NaiveDate::from_ymd_opt(2025, 7, 28).unwrap();
         let sat = NaiveDate::from_ymd_opt(2025, 8, 2).unwrap();
         let sun = NaiveDate::from_ymd_opt(2025, 8, 3).unwrap();
-        
+
         assert!(is_afternoon_shift_period(mon));
         assert!(is_afternoon_shift_period(sat));
         assert!(!is_afternoon_shift_period(sun));
     }
-    
+
     #[test]
     fn test_afternoon_shift_second_cycle() {
         let second_cycle_start = NaiveDate::from_ymd_opt(2025, 8, 18).unwrap();
         assert!(is_afternoon_shift_period(second_cycle_start));
     }
-    
+
     #[test]
     fn test_regular_week() {
         let regular_day = NaiveDate::from_ymd_opt(2025, 8, 4).unwrap();
         assert!(!is_afternoon_shift_period(regular_day));
         assert_eq!(get_shift_type(regular_day), ShiftType::Regular);
     }
-    
+
     #[test]
     fn test_weekend() {
         let sunday = NaiveDate::from_ymd_opt(2025, 8, 10).unwrap();
         assert!(is_weekend(sunday));
         assert_eq!(get_shift_type(sunday), ShiftType::Weekend);
     }
-    
+
     #[test]
     fn test_saturday_during_afternoon_shift() {
         let sat = NaiveDate::from_ymd_opt(2025, 8, 2).unwrap();

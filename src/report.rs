@@ -16,6 +16,7 @@ pub struct DayReport {
     pub hours: f64,
     pub shift_type: ShiftType,
     pub from_daily_summary: bool,
+    pub projects: Vec<(String, f64)>,
 }
 
 pub fn print_full_report(
@@ -39,14 +40,50 @@ pub fn print_full_report(
         daily.clone()
     };
 
+    let filtered_projects: HashMap<NaiveDate, HashMap<String, ProjectHours>> =
+        if let Some(filter) = month_filter {
+            projects
+                .iter()
+                .filter(|(date, _)| {
+                    let month_str = format!("{}-{:02}", date.year(), date.month());
+                    month_str == filter
+                })
+                .map(|(d, p)| (*d, p.clone()))
+                .collect()
+        } else {
+            projects.clone()
+        };
+
     let mut days: Vec<DayReport> = filtered_daily
         .iter()
         .filter(|(date, hours)| **hours > 0.0 || **date == today)
-        .map(|(date, hours)| DayReport {
-            date: *date,
-            hours: *hours,
-            shift_type: get_shift_type(*date),
-            from_daily_summary: *date != today,
+        .map(|(date, hours)| {
+            let day_projects = filtered_projects
+                .get(date)
+                .map(|projs| {
+                    let mut sorted: Vec<_> = projs
+                        .iter()
+                        .map(|(name, ph)| {
+                            let normalized =
+                                normalize_project_name(name, &config.projects.tracked_path);
+                            let total = ph.weekday_hours + ph.weekend_hours;
+                            (normalized, total)
+                        })
+                        .filter(|(name, _)| !config.projects.excluded_projects.contains(name))
+                        .filter(|(_, total)| *total > 0.001)
+                        .collect();
+                    sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                    sorted
+                })
+                .unwrap_or_default();
+
+            DayReport {
+                date: *date,
+                hours: *hours,
+                shift_type: get_shift_type(*date),
+                from_daily_summary: *date != today,
+                projects: day_projects,
+            }
         })
         .collect();
 
@@ -110,20 +147,6 @@ pub fn print_full_report(
         println!();
     }
 
-    let filtered_projects: HashMap<NaiveDate, HashMap<String, ProjectHours>> =
-        if let Some(filter) = month_filter {
-            projects
-                .iter()
-                .filter(|(date, _)| {
-                    let month_str = format!("{}-{:02}", date.year(), date.month());
-                    month_str == filter
-                })
-                .map(|(d, p)| (*d, p.clone()))
-                .collect()
-        } else {
-            projects.clone()
-        };
-
     print_project_tables(&filtered_daily, &filtered_projects, config, month_filter);
 }
 
@@ -132,12 +155,12 @@ fn print_daily_table(days: &[DayReport]) {
     struct DayRow {
         #[tabled(rename = "Data")]
         date: String,
-        #[tabled(rename = "Nadgodziny")]
+        #[tabled(rename = "Godz.")]
         hours: String,
-        #[tabled(rename = "Typ")]
+        #[tabled(rename = "Zmiana")]
         shift_type: String,
-        #[tabled(rename = "Okno nadgodzin")]
-        window: String,
+        #[tabled(rename = "Projekty")]
+        projects: String,
     }
 
     let rows: Vec<DayRow> = days
@@ -148,20 +171,33 @@ fn print_daily_table(days: &[DayReport]) {
             let date_str = format!("{} {} {}", emoji, d.date, source);
 
             let hours_str = format_hm(d.hours);
-            let shift_str = shift_type_name(&d.shift_type);
-            let window_str = overtime_window(&d.shift_type);
+            let shift_str = format!(
+                "{} ({})",
+                shift_type_name(&d.shift_type),
+                overtime_window_short(&d.shift_type)
+            );
+
+            let projects_str = if d.projects.is_empty() {
+                "—".to_string()
+            } else {
+                d.projects
+                    .iter()
+                    .map(|(name, hours)| format!("{} ({})", name, format_hm(*hours)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
 
             DayRow {
                 date: date_str,
                 hours: hours_str,
                 shift_type: shift_str,
-                window: window_str,
+                projects: projects_str,
             }
         })
         .collect();
 
     let table = Table::new(rows)
-        .with(Style::rounded())
+        .with(Style::modern())
         .with(Modify::new(Columns::single(1)).with(Alignment::center()))
         .with(Modify::new(Columns::single(2)).with(Alignment::center()))
         .to_string();
@@ -336,8 +372,14 @@ pub fn normalize_project_name(raw_name: &str, tracked_path: &str) -> String {
     }
 
     if raw_name.contains(tracked_path) {
-        let pattern = format!("-home-jarx-{}-", tracked_path);
-        let name = raw_name.replace(&pattern, "");
+        // Support both -home-jarx- (old) and -home-jarek- (new) path formats
+        let mut name = raw_name.to_string();
+        for prefix in &[
+            format!("-home-jarx-{}-", tracked_path),
+            format!("-home-jarek-{}-", tracked_path),
+        ] {
+            name = name.replace(prefix, "");
+        }
         let name = name.trim_matches('-');
         if name.is_empty() {
             "Inne".to_string()
@@ -367,12 +409,12 @@ fn shift_type_name(shift_type: &ShiftType) -> String {
     }
 }
 
-fn overtime_window(shift_type: &ShiftType) -> String {
+fn overtime_window_short(shift_type: &ShiftType) -> &'static str {
     match shift_type {
-        ShiftType::Weekend => "cały dzień".to_string(),
-        ShiftType::SaturdayAfternoon => "przed 8:00 i po 14:00".to_string(),
-        ShiftType::Afternoon => "przed 15:00 i po 21:00".to_string(),
-        ShiftType::Regular => "przed 6:00 i po 15:00".to_string(),
+        ShiftType::Weekend => "cały dzień",
+        ShiftType::SaturdayAfternoon => "<8 >14",
+        ShiftType::Afternoon => "<15 >21",
+        ShiftType::Regular => "<6 >15",
     }
 }
 
