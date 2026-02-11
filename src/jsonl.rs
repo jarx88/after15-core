@@ -153,10 +153,6 @@ pub fn load_daily_summary_full(debug: bool) -> DailySummaryData {
     result
 }
 
-pub fn find_today_jsonl_files(debug: bool) -> Vec<PathBuf> {
-    find_jsonl_files(Some(Local::now().date_naive()), None, debug)
-}
-
 pub fn find_recent_jsonl_files(days: i64, debug: bool) -> Vec<PathBuf> {
     let cutoff = Local::now().date_naive() - chrono::Duration::days(days);
     find_jsonl_files(None, Some(cutoff), debug)
@@ -240,14 +236,6 @@ fn find_jsonl_files(
 pub struct TodayData {
     pub hours: HashMap<NaiveDate, f64>,
     pub projects: HashMap<NaiveDate, HashMap<String, ProjectHours>>,
-}
-
-pub fn load_today_overtime(debug: bool) -> TodayData {
-    load_overtime_from_files(
-        find_today_jsonl_files(debug),
-        Some(Local::now().date_naive()),
-        debug,
-    )
 }
 
 pub fn load_recent_overtime(days: i64, debug: bool) -> TodayData {

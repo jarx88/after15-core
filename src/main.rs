@@ -455,7 +455,7 @@ fn send_telegram_file(path: &std::path::Path, caption: &str, config: &config::Co
             if result.status.success() {
                 let body = String::from_utf8_lossy(&result.stdout);
                 if body.contains("\"ok\":true") {
-                    println!("Wysłano na Telegram: {}", path.display());
+                    eprintln!("Wysłano na Telegram: {}", path.display());
                 } else {
                     eprintln!("[BŁĄD] Telegram API zwrócił błąd: {}", body);
                     std::process::exit(1);
