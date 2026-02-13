@@ -242,6 +242,12 @@ pub fn load_recent_overtime(days: i64, debug: bool) -> TodayData {
     load_overtime_from_files(find_recent_jsonl_files(days, debug), None, debug)
 }
 
+pub fn load_today_overtime(debug: bool) -> TodayData {
+    let today = Local::now().date_naive();
+    let files = find_jsonl_files(None, Some(today), debug);
+    load_overtime_from_files(files, Some(today), debug)
+}
+
 pub fn load_all_overtime(debug: bool) -> TodayData {
     load_overtime_from_files(find_all_jsonl_files(debug), None, debug)
 }

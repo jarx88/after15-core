@@ -79,15 +79,36 @@ pub fn load_config() -> Config {
         .map(|p| p.join("after15/config.json"))
         .or_else(|| dirs::home_dir().map(|p| p.join(".config/after15/config.json")));
 
-    if let Some(path) = config_path {
-        if path.exists() {
-            if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(config) = serde_json::from_str(&content) {
-                    return config;
-                }
-            }
-        }
+    let Some(path) = config_path else {
+        eprintln!("[WARN] Nie znaleziono katalogu konfiguracji, uzywam domyslnych wartosci");
+        return Config::default();
+    };
+
+    if !path.exists() {
+        return Config::default();
     }
 
-    Config::default()
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "[BLAD] Nie mozna odczytac pliku konfiguracji {:?}: {}. \
+                 Plik istnieje ale jest nieczytelny — sprawdz uprawnienia!",
+                path, e
+            );
+            std::process::exit(1);
+        }
+    };
+
+    match serde_json::from_str(&content) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!(
+                "[BLAD] Plik konfiguracji {:?} jest uszkodzony: {}. \
+                 Napraw JSON lub usun plik aby uzyc domyslnych wartosci.",
+                path, e
+            );
+            std::process::exit(1);
+        }
+    }
 }

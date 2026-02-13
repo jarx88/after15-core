@@ -55,6 +55,40 @@ fn main() {
         return;
     }
 
+    if cli.statusline {
+        let summary = jsonl::load_daily_summary_full(false);
+        let mut daily_hours = summary.hours;
+        let mut daily_projects = summary.projects;
+        let today = Local::now().date_naive();
+
+        if needs_daily_archive() {
+            let recent_data = jsonl::load_recent_overtime(1, false);
+            for (date, hours) in recent_data.hours {
+                if date != today && !daily_hours.contains_key(&date) {
+                    daily_hours.insert(date, hours);
+                }
+            }
+            for (date, projects) in recent_data.projects {
+                if date != today && !daily_projects.contains_key(&date) {
+                    daily_projects.insert(date, projects);
+                }
+            }
+            archive::archive_overtime(&daily_hours, &daily_projects, false);
+            auto_telegram_backup(&config);
+            mark_daily_archive_done();
+        }
+
+        let today_data = jsonl::load_today_overtime(false);
+        for (date, hours) in today_data.hours {
+            if date == today {
+                daily_hours.insert(date, hours);
+            }
+        }
+
+        print_statusline(&daily_hours);
+        return;
+    }
+
     auto_telegram_backup(&config);
 
     if let Some(explain_date_str) = &cli.explain {
@@ -78,7 +112,7 @@ fn main() {
     let mut daily_projects = summary.projects;
 
     let today = Local::now().date_naive();
-    let recent_data = jsonl::load_recent_overtime(7, cli.debug);
+    let recent_data = jsonl::load_recent_overtime(1, cli.debug);
 
     for (date, hours) in recent_data.hours {
         if date == today || !daily_hours.contains_key(&date) {
@@ -123,8 +157,6 @@ fn main() {
                 std::process::exit(1);
             }
         }
-    } else if cli.statusline {
-        print_statusline(&daily_hours);
     } else {
         report::print_full_report(&daily_hours, &daily_projects, &config, cli.month.as_deref());
     }
@@ -385,6 +417,40 @@ fn print_explain(date: chrono::NaiveDate, debug: bool) {
             .yellow()
             .bold()
     );
+}
+
+fn needs_daily_archive() -> bool {
+    let marker_path = dirs::data_dir()
+        .or_else(|| dirs::home_dir().map(|p| p.join(".local/share")))
+        .map(|p| p.join("claude-overtime/.statusline_last_archive"));
+
+    let Some(marker) = marker_path else {
+        return true;
+    };
+
+    if marker.exists() {
+        if let Ok(content) = std::fs::read_to_string(&marker) {
+            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            if content.trim() == today {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn mark_daily_archive_done() {
+    let marker_path = dirs::data_dir()
+        .or_else(|| dirs::home_dir().map(|p| p.join(".local/share")))
+        .map(|p| p.join("claude-overtime/.statusline_last_archive"));
+
+    if let Some(marker) = marker_path {
+        if let Some(parent) = marker.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let _ = std::fs::write(&marker, &today);
+    }
 }
 
 fn auto_telegram_backup(config: &config::Config) {

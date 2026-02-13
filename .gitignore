@@ -1,1 +1,4 @@
 /target
+
+# Config contains secrets (Telegram bot token)
+config.json
