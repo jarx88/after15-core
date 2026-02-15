@@ -8,7 +8,9 @@ mod schedule;
 
 use chrono::{Datelike, Local};
 use clap::Parser;
+use fs2::FileExt;
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
 
 use report::format_hm;
 
@@ -61,21 +63,23 @@ fn main() {
         let mut daily_projects = summary.projects;
         let today = Local::now().date_naive();
 
-        if needs_daily_archive() {
-            let recent_data = jsonl::load_recent_overtime(1, false);
-            for (date, hours) in recent_data.hours {
-                if date != today && !daily_hours.contains_key(&date) {
-                    daily_hours.insert(date, hours);
+        if let Some(_daily_lock) = lock_daily_automation() {
+            if needs_daily_archive() {
+                let recent_data = jsonl::load_recent_overtime(1, false);
+                for (date, hours) in recent_data.hours {
+                    if date != today && !daily_hours.contains_key(&date) {
+                        daily_hours.insert(date, hours);
+                    }
                 }
-            }
-            for (date, projects) in recent_data.projects {
-                if date != today && !daily_projects.contains_key(&date) {
-                    daily_projects.insert(date, projects);
+                for (date, projects) in recent_data.projects {
+                    if date != today && !daily_projects.contains_key(&date) {
+                        daily_projects.insert(date, projects);
+                    }
                 }
+                archive::archive_overtime(&daily_hours, &daily_projects, false);
+                auto_telegram_backup(&config);
+                mark_daily_archive_done();
             }
-            archive::archive_overtime(&daily_hours, &daily_projects, false);
-            auto_telegram_backup(&config);
-            mark_daily_archive_done();
         }
 
         let today_data = jsonl::load_today_overtime(false);
@@ -439,6 +443,25 @@ fn needs_daily_archive() -> bool {
     true
 }
 
+fn lock_daily_automation() -> Option<File> {
+    let lock_path = dirs::data_dir()
+        .or_else(|| dirs::home_dir().map(|p| p.join(".local/share")))
+        .map(|p| p.join("claude-overtime/.daily_automation.lock"))?;
+
+    if let Some(parent) = lock_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .ok()?;
+
+    file.try_lock_exclusive().ok()?;
+    Some(file)
+}
+
 fn mark_daily_archive_done() {
     let marker_path = dirs::data_dir()
         .or_else(|| dirs::home_dir().map(|p| p.join(".local/share")))
@@ -457,6 +480,10 @@ fn auto_telegram_backup(config: &config::Config) {
     if !config.telegram.is_configured() {
         return;
     }
+
+    let Some(_telegram_lock) = lock_telegram_backup() else {
+        return;
+    };
 
     let marker_path = dirs::data_dir()
         .or_else(|| dirs::home_dir().map(|p| p.join(".local/share")))
@@ -480,6 +507,25 @@ fn auto_telegram_backup(config: &config::Config) {
         }
         let _ = std::fs::write(&marker, &today);
     }
+}
+
+fn lock_telegram_backup() -> Option<File> {
+    let lock_path = dirs::data_dir()
+        .or_else(|| dirs::home_dir().map(|p| p.join(".local/share")))
+        .map(|p| p.join("claude-overtime/.telegram_backup.lock"))?;
+
+    if let Some(parent) = lock_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .ok()?;
+
+    file.try_lock_exclusive().ok()?;
+    Some(file)
 }
 
 fn send_telegram_file(
