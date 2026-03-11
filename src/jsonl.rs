@@ -6,6 +6,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+use crate::config::Config;
 use crate::overtime::calculate_session_overtime;
 use crate::schedule::is_weekend;
 
@@ -238,18 +239,18 @@ pub struct TodayData {
     pub projects: HashMap<NaiveDate, HashMap<String, ProjectHours>>,
 }
 
-pub fn load_recent_overtime(days: i64, debug: bool) -> TodayData {
-    load_overtime_from_files(find_recent_jsonl_files(days, debug), None, debug)
+pub fn load_recent_overtime(days: i64, config: &Config, debug: bool) -> TodayData {
+    load_overtime_from_files(find_recent_jsonl_files(days, debug), None, config, debug)
 }
 
-pub fn load_today_overtime(debug: bool) -> TodayData {
+pub fn load_today_overtime(config: &Config, debug: bool) -> TodayData {
     let today = Local::now().date_naive();
     let files = find_jsonl_files(None, Some(today), debug);
-    load_overtime_from_files(files, Some(today), debug)
+    load_overtime_from_files(files, Some(today), config, debug)
 }
 
-pub fn load_all_overtime(debug: bool) -> TodayData {
-    load_overtime_from_files(find_all_jsonl_files(debug), None, debug)
+pub fn load_all_overtime(config: &Config, debug: bool) -> TodayData {
+    load_overtime_from_files(find_all_jsonl_files(debug), None, config, debug)
 }
 
 pub fn load_sessions_for_date(date: NaiveDate, debug: bool) -> Vec<Session> {
@@ -296,6 +297,7 @@ struct TimestampRecord {
 fn load_overtime_from_files(
     files: Vec<PathBuf>,
     date_filter: Option<NaiveDate>,
+    config: &Config,
     debug: bool,
 ) -> TodayData {
     let mut result = TodayData {
@@ -341,7 +343,7 @@ fn load_overtime_from_files(
 
     for session in sessions {
         let filter = date_filter.unwrap_or(session.start_time.date());
-        let overtime = calculate_session_overtime(&session, filter, debug);
+        let overtime = calculate_session_overtime(&session, filter, config, debug);
 
         let real_projects: HashMap<String, usize> = session
             .project_counts

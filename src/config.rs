@@ -1,5 +1,9 @@
-use serde::Deserialize;
+use chrono::{NaiveDate, NaiveTime};
+use serde::{Deserialize, Deserializer};
+use std::convert::TryFrom;
 use std::fs;
+
+use crate::schedule::WorkWindow;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct SalaryConfig {
@@ -50,6 +54,54 @@ impl TelegramConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct WorkWindowOverride {
+    pub date: NaiveDate,
+    pub start: NaiveTime,
+    pub end: NaiveTime,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkWindowOverrideRaw {
+    #[serde(deserialize_with = "deserialize_date")]
+    date: NaiveDate,
+    #[serde(deserialize_with = "deserialize_time")]
+    start: NaiveTime,
+    #[serde(deserialize_with = "deserialize_time")]
+    end: NaiveTime,
+}
+
+impl TryFrom<WorkWindowOverrideRaw> for WorkWindowOverride {
+    type Error = String;
+
+    fn try_from(raw: WorkWindowOverrideRaw) -> Result<Self, Self::Error> {
+        if raw.start >= raw.end {
+            return Err(format!(
+                "Nieprawidlowe okno pracy dla {}: start ({}) musi byc wczesniej niz end ({})",
+                raw.date,
+                raw.start.format("%H:%M"),
+                raw.end.format("%H:%M")
+            ));
+        }
+
+        Ok(Self {
+            date: raw.date,
+            start: raw.start,
+            end: raw.end,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkWindowOverride {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = WorkWindowOverrideRaw::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct Config {
     #[serde(default)]
@@ -58,6 +110,8 @@ pub struct Config {
     pub projects: ProjectsConfig,
     #[serde(default)]
     pub telegram: TelegramConfig,
+    #[serde(default)]
+    pub work_window_overrides: Vec<WorkWindowOverride>,
 }
 
 impl Config {
@@ -72,6 +126,32 @@ impl Config {
     pub fn overtime_rate_weekend(&self) -> f64 {
         self.hourly_rate() * self.salary.overtime_multiplier_weekend
     }
+
+    pub fn work_window_override(&self, date: NaiveDate) -> Option<WorkWindow> {
+        self.work_window_overrides
+            .iter()
+            .find(|entry| entry.date == date)
+            .map(|entry| WorkWindow {
+                start: entry.start,
+                end: entry.end,
+            })
+    }
+}
+
+fn deserialize_date<'de, D>(deserializer: D) -> Result<NaiveDate, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    NaiveDate::parse_from_str(&value, "%Y-%m-%d").map_err(serde::de::Error::custom)
+}
+
+fn deserialize_time<'de, D>(deserializer: D) -> Result<NaiveTime, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    NaiveTime::parse_from_str(&value, "%H:%M").map_err(serde::de::Error::custom)
 }
 
 pub fn load_config() -> Config {
@@ -110,5 +190,51 @@ pub fn load_config() -> Config {
             );
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{NaiveDate, NaiveTime};
+
+    #[test]
+    fn test_deserializes_work_window_override() {
+        let config: Config = serde_json::from_str(
+            r#"{
+                "work_window_overrides": [
+                    {
+                        "date": "2026-03-11",
+                        "start": "15:00",
+                        "end": "21:00"
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let window = config
+            .work_window_override(NaiveDate::from_ymd_opt(2026, 3, 11).unwrap())
+            .unwrap();
+
+        assert_eq!(window.start, NaiveTime::from_hms_opt(15, 0, 0).unwrap());
+        assert_eq!(window.end, NaiveTime::from_hms_opt(21, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn test_rejects_invalid_work_window_override() {
+        let result = serde_json::from_str::<Config>(
+            r#"{
+                "work_window_overrides": [
+                    {
+                        "date": "2026-03-11",
+                        "start": "21:00",
+                        "end": "15:00"
+                    }
+                ]
+            }"#,
+        );
+
+        assert!(result.is_err());
     }
 }

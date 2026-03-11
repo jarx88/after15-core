@@ -2,12 +2,14 @@ use chrono::{Duration, NaiveDate, NaiveTime};
 use chrono_tz::Europe::Warsaw;
 use std::collections::HashMap;
 
+use crate::config::Config;
 use crate::jsonl::Session;
 use crate::schedule::{get_regular_work_window, get_shift_type, ShiftType};
 
 pub fn calculate_session_overtime(
     session: &Session,
     _filter_date: NaiveDate,
+    config: &Config,
     debug: bool,
 ) -> HashMap<NaiveDate, f64> {
     let mut daily: HashMap<NaiveDate, f64> = HashMap::new();
@@ -29,8 +31,12 @@ pub fn calculate_session_overtime(
         let block_end = end_local.min(day_end);
 
         if block_end > block_start {
-            let overtime_seconds =
-                calculate_overtime_for_day(current_date, block_start.time(), block_end.time());
+            let overtime_seconds = calculate_overtime_for_day(
+                current_date,
+                block_start.time(),
+                block_end.time(),
+                config,
+            );
 
             if overtime_seconds > 0.0 {
                 let hours = overtime_seconds / 3600.0;
@@ -48,27 +54,34 @@ pub fn calculate_session_overtime(
     daily
 }
 
-fn calculate_overtime_for_day(date: NaiveDate, start: NaiveTime, end: NaiveTime) -> f64 {
-    let shift_type = get_shift_type(date);
+fn calculate_overtime_for_day(
+    date: NaiveDate,
+    start: NaiveTime,
+    end: NaiveTime,
+    config: &Config,
+) -> f64 {
+    let work_window = config
+        .work_window_override(date)
+        .or_else(|| get_regular_work_window(date));
 
-    match shift_type {
-        ShiftType::Weekend => (end - start).num_seconds() as f64,
-        ShiftType::Regular | ShiftType::Afternoon | ShiftType::SaturdayAfternoon => {
-            if let Some(window) = get_regular_work_window(date) {
-                let mut overtime_secs = 0.0;
+    if let Some(window) = work_window {
+        let mut overtime_secs = 0.0;
 
-                if start < window.start {
-                    let overtime_end = end.min(window.start);
-                    overtime_secs += (overtime_end - start).num_seconds() as f64;
-                }
+        if start < window.start {
+            let overtime_end = end.min(window.start);
+            overtime_secs += (overtime_end - start).num_seconds() as f64;
+        }
 
-                if end > window.end {
-                    let overtime_start = start.max(window.end);
-                    overtime_secs += (end - overtime_start).num_seconds() as f64;
-                }
+        if end > window.end {
+            let overtime_start = start.max(window.end);
+            overtime_secs += (end - overtime_start).num_seconds() as f64;
+        }
 
-                overtime_secs
-            } else {
+        overtime_secs
+    } else {
+        match get_shift_type(date) {
+            ShiftType::Weekend => (end - start).num_seconds() as f64,
+            ShiftType::Regular | ShiftType::Afternoon | ShiftType::SaturdayAfternoon => {
                 (end - start).num_seconds() as f64
             }
         }
@@ -78,6 +91,14 @@ fn calculate_overtime_for_day(date: NaiveDate, start: NaiveTime, end: NaiveTime)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{Config, WorkWindowOverride};
+
+    fn config_with_override(date: NaiveDate, start: NaiveTime, end: NaiveTime) -> Config {
+        Config {
+            work_window_overrides: vec![WorkWindowOverride { date, start, end }],
+            ..Config::default()
+        }
+    }
 
     #[test]
     fn test_regular_day_no_overtime() {
@@ -85,7 +106,7 @@ mod tests {
         let start = NaiveTime::from_hms_opt(8, 0, 0).unwrap();
         let end = NaiveTime::from_hms_opt(14, 0, 0).unwrap();
 
-        let overtime = calculate_overtime_for_day(date, start, end);
+        let overtime = calculate_overtime_for_day(date, start, end, &Config::default());
         assert_eq!(overtime, 0.0);
     }
 
@@ -95,7 +116,7 @@ mod tests {
         let start = NaiveTime::from_hms_opt(14, 0, 0).unwrap();
         let end = NaiveTime::from_hms_opt(17, 0, 0).unwrap();
 
-        let overtime = calculate_overtime_for_day(date, start, end);
+        let overtime = calculate_overtime_for_day(date, start, end, &Config::default());
         assert_eq!(overtime, 2.0 * 3600.0);
     }
 
@@ -105,7 +126,7 @@ mod tests {
         let start = NaiveTime::from_hms_opt(10, 0, 0).unwrap();
         let end = NaiveTime::from_hms_opt(14, 0, 0).unwrap();
 
-        let overtime = calculate_overtime_for_day(date, start, end);
+        let overtime = calculate_overtime_for_day(date, start, end, &Config::default());
         assert_eq!(overtime, 4.0 * 3600.0);
     }
 
@@ -115,7 +136,38 @@ mod tests {
         let start = NaiveTime::from_hms_opt(10, 0, 0).unwrap();
         let end = NaiveTime::from_hms_opt(14, 0, 0).unwrap();
 
-        let overtime = calculate_overtime_for_day(date, start, end);
+        let overtime = calculate_overtime_for_day(date, start, end, &Config::default());
         assert_eq!(overtime, 4.0 * 3600.0);
+    }
+
+    #[test]
+    fn test_work_window_override_disables_overtime_for_matching_window() {
+        let date = NaiveDate::from_ymd_opt(2026, 3, 11).unwrap();
+        let start = NaiveTime::from_hms_opt(15, 0, 0).unwrap();
+        let end = NaiveTime::from_hms_opt(21, 0, 0).unwrap();
+        let config = config_with_override(date, start, end);
+
+        let overtime = calculate_overtime_for_day(date, start, end, &config);
+
+        assert_eq!(overtime, 0.0);
+    }
+
+    #[test]
+    fn test_work_window_override_applies_on_weekend() {
+        let date = NaiveDate::from_ymd_opt(2026, 3, 15).unwrap();
+        let config = config_with_override(
+            date,
+            NaiveTime::from_hms_opt(10, 0, 0).unwrap(),
+            NaiveTime::from_hms_opt(14, 0, 0).unwrap(),
+        );
+
+        let overtime = calculate_overtime_for_day(
+            date,
+            NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+            NaiveTime::from_hms_opt(15, 0, 0).unwrap(),
+            &config,
+        );
+
+        assert_eq!(overtime, 2.0 * 3600.0);
     }
 }

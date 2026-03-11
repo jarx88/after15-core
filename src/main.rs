@@ -48,7 +48,7 @@ fn main() {
     let config = config::load_config();
 
     if cli.rebuild {
-        rebuild_archive(cli.debug);
+        rebuild_archive(&config, cli.debug);
         return;
     }
 
@@ -65,7 +65,7 @@ fn main() {
 
         if let Some(_daily_lock) = lock_daily_automation() {
             if needs_daily_archive() {
-                let recent_data = jsonl::load_recent_overtime(1, false);
+                let recent_data = jsonl::load_recent_overtime(1, &config, false);
                 for (date, hours) in recent_data.hours {
                     if date != today && !daily_hours.contains_key(&date) {
                         daily_hours.insert(date, hours);
@@ -82,14 +82,14 @@ fn main() {
             }
         }
 
-        let today_data = jsonl::load_today_overtime(false);
+        let today_data = jsonl::load_today_overtime(&config, false);
         for (date, hours) in today_data.hours {
             if date == today {
                 daily_hours.insert(date, hours);
             }
         }
 
-        print_statusline(&daily_hours);
+        print_statusline(&daily_hours, &config);
         return;
     }
 
@@ -116,7 +116,7 @@ fn main() {
     let mut daily_projects = summary.projects;
 
     let today = Local::now().date_naive();
-    let recent_data = jsonl::load_recent_overtime(1, cli.debug);
+    let recent_data = jsonl::load_recent_overtime(1, &config, cli.debug);
 
     for (date, hours) in recent_data.hours {
         if date == today || !daily_hours.contains_key(&date) {
@@ -166,9 +166,9 @@ fn main() {
     }
 }
 
-fn rebuild_archive(debug: bool) {
+fn rebuild_archive(config: &config::Config, debug: bool) {
     let _lock = archive::lock_archive();
-    let fresh = jsonl::load_all_overtime(debug);
+    let fresh = jsonl::load_all_overtime(config, debug);
     let mut archive = archive::load_summary();
 
     let pre_rebuild_days = archive.days.len();
@@ -254,7 +254,7 @@ fn rebuild_archive(debug: bool) {
     }
 }
 
-fn print_statusline(daily: &HashMap<chrono::NaiveDate, f64>) {
+fn print_statusline(daily: &HashMap<chrono::NaiveDate, f64>, config: &config::Config) {
     let today = Local::now().date_naive();
     let today_hours = daily.get(&today).copied().unwrap_or(0.0);
 
@@ -264,7 +264,8 @@ fn print_statusline(daily: &HashMap<chrono::NaiveDate, f64>) {
         .map(|(_, h)| h)
         .sum();
 
-    let icon = if schedule::is_overtime_hour(Local::now()) {
+    let now = Local::now();
+    let icon = if schedule::is_overtime_hour(now, config.work_window_override(today)) {
         "🌙"
     } else {
         "🏢"
@@ -293,7 +294,8 @@ fn print_explain(date: chrono::NaiveDate, debug: bool) {
         schedule::ShiftType::SaturdayAfternoon => "SOBOTA (zmiana popołudniowa)",
     };
 
-    let window = schedule::get_regular_work_window(date);
+    let override_window = cfg.work_window_override(date);
+    let window = override_window.or_else(|| schedule::get_regular_work_window(date));
     let window_desc = match &window {
         Some(w) => format!(
             "{}:00-{}:00 = regularne, reszta = nadgodziny",
@@ -306,6 +308,9 @@ fn print_explain(date: chrono::NaiveDate, debug: bool) {
     println!();
     println!("{}", format!("[WYJAŚNIENIE dla {}]", date).cyan().bold());
     println!("Typ zmiany: {}", shift_name.yellow());
+    if override_window.is_some() {
+        println!("Wyjątek: {}", "okno pracy nadpisane z configu".yellow());
+    }
     println!("Okno pracy: {}", window_desc);
     println!();
 
@@ -336,7 +341,7 @@ fn print_explain(date: chrono::NaiveDate, debug: bool) {
             .with_timezone(&Warsaw)
             .naive_local();
 
-        let overtime_result = overtime::calculate_session_overtime(session, date, false);
+        let overtime_result = overtime::calculate_session_overtime(session, date, &cfg, false);
         let overtime_hours = overtime_result.get(&date).copied().unwrap_or(0.0);
         let overtime_secs = overtime_hours * 3600.0;
         total_overtime_secs += overtime_secs;

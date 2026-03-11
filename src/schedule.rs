@@ -62,6 +62,7 @@ pub fn get_shift_type(date: NaiveDate) -> ShiftType {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct WorkWindow {
     pub start: NaiveTime,
     pub end: NaiveTime,
@@ -85,11 +86,11 @@ pub fn get_regular_work_window(date: NaiveDate) -> Option<WorkWindow> {
     }
 }
 
-pub fn is_overtime_hour(dt: DateTime<Local>) -> bool {
+pub fn is_overtime_hour(dt: DateTime<Local>, work_window_override: Option<WorkWindow>) -> bool {
     let date = dt.date_naive();
     let time = dt.time();
 
-    match get_regular_work_window(date) {
+    match work_window_override.or_else(|| get_regular_work_window(date)) {
         Some(window) => time < window.start || time >= window.end,
         None => true,
     }
