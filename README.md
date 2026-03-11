@@ -114,9 +114,39 @@ Utworz plik `~/.config/after15/config.json`:
   "projects": {
     "tracked_path": "Programowanie",
     "excluded_projects": ["sandbox", "test-project"]
-  }
+  },
+  "work_window_overrides": [
+    {
+      "date": "2026-03-11",
+      "start": "15:00",
+      "end": "21:00"
+    }
+  ]
 }
 ```
+
+`work_window_overrides` pozwala nadpisac standardowe godziny pracy dla wybranych dni. Dla takiej daty program traktuje przedzial `start`-`end` jako normalny czas pracy, a nadgodziny liczy tylko poza tym oknem - takze wtedy, gdy data wypada w weekend.
+
+Mozesz dodac wiele dni:
+
+```json
+"work_window_overrides": [
+  {
+    "date": "2026-03-11",
+    "start": "15:00",
+    "end": "21:00"
+  },
+  {
+    "date": "2026-03-25",
+    "start": "12:00",
+    "end": "18:00"
+  }
+]
+```
+
+Zmiana `config.json` nie wymaga rekompilacji. `after15` wczytuje te wpisy przy kazdym uruchomieniu.
+
+Jesli dodajesz override dla starszego dnia, ktory jest juz zapisany w archiwum, uruchom `after15 --rebuild`. Bez tego pelny raport moze dalej pokazywac stare wyliczenia z archiwum.
 
 ### Opcje konfiguracji
 
@@ -124,6 +154,7 @@ Utworz plik `~/.config/after15/config.json`:
 |------|------|-----------|
 | `tracked_path` | Fragment sciezki do projektow | "Programowanie" |
 | `excluded_projects` | Projekty do pominiecia | [] |
+| `work_window_overrides` | Lista wyjatkow z wlasnym oknem pracy dla konkretnych dni | [] |
 
 ## System zmian
 
