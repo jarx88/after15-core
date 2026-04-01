@@ -29,6 +29,8 @@ pub struct ProjectsConfig {
     pub tracked_path: String,
     #[serde(default)]
     pub excluded_projects: Vec<String>,
+    #[serde(default)]
+    pub excluded_sources: Vec<String>,
 }
 
 impl Default for ProjectsConfig {
@@ -36,6 +38,7 @@ impl Default for ProjectsConfig {
         Self {
             tracked_path: "Programowanie".to_string(),
             excluded_projects: vec![],
+            excluded_sources: vec![],
         }
     }
 }
@@ -125,6 +128,13 @@ impl Config {
 
     pub fn overtime_rate_weekend(&self) -> f64 {
         self.hourly_rate() * self.salary.overtime_multiplier_weekend
+    }
+
+    pub fn is_source_excluded(&self, raw_project_name: &str) -> bool {
+        self.projects
+            .excluded_sources
+            .iter()
+            .any(|s| raw_project_name.contains(s.as_str()))
     }
 
     pub fn work_window_override(&self, date: NaiveDate) -> Option<WorkWindow> {

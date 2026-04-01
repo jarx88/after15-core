@@ -8,6 +8,7 @@ use walkdir::WalkDir;
 
 use crate::config::Config;
 use crate::overtime::calculate_session_overtime;
+use crate::report::normalize_project_name;
 use crate::schedule::is_weekend;
 
 #[derive(Debug, Clone)]
@@ -70,7 +71,7 @@ pub struct DailySummaryData {
     pub projects: HashMap<NaiveDate, HashMap<String, ProjectHours>>,
 }
 
-pub fn load_daily_summary_full(debug: bool) -> DailySummaryData {
+pub fn load_daily_summary_full(config: &Config, debug: bool) -> DailySummaryData {
     let mut result = DailySummaryData {
         hours: HashMap::new(),
         projects: HashMap::new(),
@@ -121,24 +122,35 @@ pub fn load_daily_summary_full(debug: bool) -> DailySummaryData {
 
     for (date_str, day_data) in summary.days {
         if let Ok(date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
-            if day_data.hours > 0.0 {
-                result.hours.insert(date, day_data.hours);
-            }
-
             if let Some(projects) = day_data.projects {
                 let mut day_projects: HashMap<String, ProjectHours> = HashMap::new();
+                let mut recalculated_hours = 0.0;
                 for (proj_name, proj_hours) in projects {
-                    day_projects.insert(
-                        proj_name,
-                        ProjectHours {
-                            weekday_hours: proj_hours.weekday_hours,
-                            weekend_hours: proj_hours.weekend_hours,
-                        },
+                    if config.is_source_excluded(&proj_name) {
+                        continue;
+                    }
+                    let normalized = normalize_project_name(
+                        &proj_name,
+                        &config.projects.tracked_path,
                     );
+                    if config.projects.excluded_projects.contains(&normalized) {
+                        continue;
+                    }
+                    let ph = ProjectHours {
+                        weekday_hours: proj_hours.weekday_hours,
+                        weekend_hours: proj_hours.weekend_hours,
+                    };
+                    recalculated_hours += ph.weekday_hours + ph.weekend_hours;
+                    day_projects.insert(proj_name, ph);
+                }
+                if recalculated_hours > 0.0 {
+                    result.hours.insert(date, recalculated_hours);
                 }
                 if !day_projects.is_empty() {
                     result.projects.insert(date, day_projects);
                 }
+            } else if day_data.hours > 0.0 {
+                result.hours.insert(date, day_data.hours);
             }
         }
     }
@@ -253,7 +265,7 @@ pub fn load_all_overtime(config: &Config, debug: bool) -> TodayData {
     load_overtime_from_files(find_all_jsonl_files(debug), None, config, debug)
 }
 
-pub fn load_sessions_for_date(date: NaiveDate, debug: bool) -> Vec<Session> {
+pub fn load_sessions_for_date(date: NaiveDate, config: &Config, debug: bool) -> Vec<Session> {
     use chrono_tz::Europe::Warsaw;
 
     let files = find_all_jsonl_files(debug);
@@ -269,6 +281,7 @@ pub fn load_sessions_for_date(date: NaiveDate, debug: bool) -> Vec<Session> {
         return Vec::new();
     }
 
+    all_records.retain(|r| !config.is_source_excluded(&r.project));
     all_records.sort_by_key(|r| r.timestamp);
 
     let sessions = build_sessions_from_records(&all_records, false);
@@ -323,11 +336,12 @@ fn load_overtime_from_files(
         return result;
     }
 
+    all_records.retain(|r| !config.is_source_excluded(&r.project));
     all_records.sort_by_key(|r| r.timestamp);
 
     if debug {
         eprintln!(
-            "[DEBUG] Collected {} total records from all files",
+            "[DEBUG] Collected {} total records from all files (after source exclusion)",
             all_records.len()
         );
     }

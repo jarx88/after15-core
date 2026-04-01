@@ -58,7 +58,7 @@ fn main() {
     }
 
     if cli.statusline {
-        let summary = jsonl::load_daily_summary_full(false);
+        let summary = jsonl::load_daily_summary_full(&config, false);
         let mut daily_hours = summary.hours;
         let mut daily_projects = summary.projects;
         let today = Local::now().date_naive();
@@ -111,7 +111,7 @@ fn main() {
         }
     }
 
-    let summary = jsonl::load_daily_summary_full(cli.debug);
+    let summary = jsonl::load_daily_summary_full(&config, cli.debug);
     let mut daily_hours = summary.hours;
     let mut daily_projects = summary.projects;
 
@@ -314,7 +314,7 @@ fn print_explain(date: chrono::NaiveDate, debug: bool) {
     println!("Okno pracy: {}", window_desc);
     println!();
 
-    let sessions = jsonl::load_sessions_for_date(date, debug);
+    let sessions = jsonl::load_sessions_for_date(date, &cfg, debug);
 
     if sessions.is_empty() {
         println!("{}", "Brak sesji z nadgodzinami dla tego dnia.".red());
