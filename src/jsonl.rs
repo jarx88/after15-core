@@ -29,6 +29,8 @@ struct JsonlEntry {
     #[serde(rename = "sessionId")]
     #[allow(dead_code)]
     session_id: Option<String>,
+    #[serde(rename = "type")]
+    entry_type: Option<String>,
     tool_input: Option<ToolInput>,
 }
 
@@ -418,6 +420,11 @@ fn collect_timestamps_from_file(path: &Path) -> Vec<TimestampRecord> {
 
     for line in reader.lines().flatten() {
         if let Ok(entry) = serde_json::from_str::<JsonlEntry>(&line) {
+            let entry_type = entry.entry_type.as_deref().unwrap_or("");
+            if entry_type != "assistant" && entry_type != "user" {
+                continue;
+            }
+
             if let Some(ref ts_str) = entry.timestamp {
                 if let Some(ts) = parse_timestamp(ts_str) {
                     let project = if is_transcript {
