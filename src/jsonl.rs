@@ -281,7 +281,7 @@ pub fn load_sessions_for_date(date: NaiveDate, config: &Config, debug: bool) -> 
         return Vec::new();
     }
 
-    all_records.retain(|r| !config.is_source_excluded(&r.project));
+    all_records.retain(|r| config.is_tracked_source(&r.project) && !config.is_source_excluded(&r.project));
     all_records.sort_by_key(|r| r.timestamp);
 
     let sessions = build_sessions_from_records(&all_records, false);
@@ -336,12 +336,12 @@ fn load_overtime_from_files(
         return result;
     }
 
-    all_records.retain(|r| !config.is_source_excluded(&r.project));
+    all_records.retain(|r| config.is_tracked_source(&r.project) && !config.is_source_excluded(&r.project));
     all_records.sort_by_key(|r| r.timestamp);
 
     if debug {
         eprintln!(
-            "[DEBUG] Collected {} total records from all files (after source exclusion)",
+            "[DEBUG] Collected {} total records from all files (after source filtering)",
             all_records.len()
         );
     }

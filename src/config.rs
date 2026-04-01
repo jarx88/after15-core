@@ -137,6 +137,10 @@ impl Config {
             .any(|s| raw_project_name.contains(s.as_str()))
     }
 
+    pub fn is_tracked_source(&self, raw_project_name: &str) -> bool {
+        raw_project_name.contains(&self.projects.tracked_path)
+    }
+
     pub fn work_window_override(&self, date: NaiveDate) -> Option<WorkWindow> {
         self.work_window_overrides
             .iter()
