@@ -421,8 +421,10 @@ fn collect_timestamps_from_file(path: &Path) -> Vec<TimestampRecord> {
     for line in reader.lines().flatten() {
         if let Ok(entry) = serde_json::from_str::<JsonlEntry>(&line) {
             let entry_type = entry.entry_type.as_deref().unwrap_or("");
-            if entry_type != "assistant" && entry_type != "user" {
-                continue;
+            match entry_type {
+                "system" | "file-history-snapshot" | "queue-operation"
+                | "custom-title" | "agent-name" | "last-prompt" | "pr-link" => continue,
+                _ => {}
             }
 
             if let Some(ref ts_str) = entry.timestamp {
