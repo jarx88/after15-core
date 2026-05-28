@@ -112,8 +112,13 @@ impl EditState {
     pub fn begin_edit(&mut self) {
         if self.rows.is_empty() { return; }
         let row = &self.rows[self.cursor];
-        // prefill bieżącą wartością w formacie H:MM
-        self.editing = Some(format_hm(row.hours));
+        // prefill bieżącą wartością w formacie H:MM (pusta dla 0h — nowy/wirtualny dzień)
+        let prefill = if row.hours == 0.0 {
+            String::new()
+        } else {
+            format_hm(row.hours)
+        };
+        self.editing = Some(prefill);
         self.status.clear();
     }
 
@@ -336,5 +341,106 @@ mod tests {
         st.prev_month();
         st.prev_month();
         assert_eq!((st.year, st.month), (2026, 11));
+    }
+
+    #[test]
+    fn commit_edit_sets_hours_and_manual_flag() {
+        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5);
+        st.cursor = 0; // 1 maja, wirtualny
+        st.begin_edit();
+        assert!(st.editing.is_some());
+        for c in "3:00".chars() { st.input_char(c); }
+        st.commit_edit();
+        assert!(st.editing.is_none());
+        let row = &st.rows[0];
+        assert!((row.hours - 3.0).abs() < 1e-9);
+        assert!(row.manual_override);
+        assert!(row.dirty);
+        assert!(st.dirty);
+        // zapisane do summary
+        let e = st.summary.days.get("2026-05-01").unwrap();
+        assert!(e.manual_override);
+        assert!(e.processed);
+        assert_eq!(e.formatted, "3:00");
+        assert_eq!(e.shift, row.shift); // shift z automatu zachowany
+    }
+
+    #[test]
+    fn commit_edit_rejects_invalid_keeps_editing() {
+        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5);
+        st.begin_edit();
+        // begin_edit prefilluje "0:00" — wyczyść i wpisz złą wartość
+        st.editing = Some(String::new());
+        for c in "99".chars() { st.input_char(c); }
+        st.commit_edit();
+        assert!(st.editing.is_some()); // nadal edycja
+        assert!(!st.dirty);
+        assert!(!st.status.is_empty());
+    }
+
+    #[test]
+    fn cancel_edit_discards() {
+        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5);
+        st.begin_edit();
+        st.input_char('5');
+        st.cancel_edit();
+        assert!(st.editing.is_none());
+        assert!(!st.dirty);
+        assert_eq!(st.rows[0].hours, 0.0);
+    }
+
+    #[test]
+    fn commit_preserves_projects_of_existing_day() {
+        let mut s = DailySummaryFile::default();
+        let mut proj = std::collections::BTreeMap::new();
+        proj.insert("farmaster".to_string(), crate::archive::ProjectHoursEntry::default());
+        s.days.insert("2026-05-03".to_string(), DayEntry { hours: 1.0, formatted: "1:00".into(), shift: "regular".into(), processed: true, manual_override: false, projects: Some(proj) });
+        let mut st = EditState::new(s, 2026, 5);
+        st.cursor = 2; // 3 maja
+        st.begin_edit();
+        st.editing = Some(String::new());
+        for c in "2:30".chars() { st.input_char(c); }
+        st.commit_edit();
+        let e = st.summary.days.get("2026-05-03").unwrap();
+        assert!((e.hours - 2.5).abs() < 1e-9);
+        assert!(e.projects.is_some()); // projekty zachowane
+    }
+
+    #[test]
+    fn toggle_manual_on_existing_day() {
+        let mut s = DailySummaryFile::default();
+        s.days.insert("2026-05-04".to_string(), DayEntry { hours: 2.0, formatted: "2:00".into(), shift: "regular".into(), processed: true, manual_override: false, projects: None });
+        let mut st = EditState::new(s, 2026, 5);
+        st.cursor = 3;
+        st.toggle_manual();
+        assert!(st.rows[3].manual_override);
+        assert!(st.summary.days.get("2026-05-04").unwrap().manual_override);
+        assert!(st.dirty);
+        st.toggle_manual();
+        assert!(!st.rows[3].manual_override);
+        assert!(!st.summary.days.get("2026-05-04").unwrap().manual_override);
+    }
+
+    #[test]
+    fn toggle_manual_on_virtual_day_creates_entry() {
+        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5);
+        st.cursor = 0; // wirtualny
+        st.toggle_manual();
+        assert!(st.rows[0].manual_override);
+        let e = st.summary.days.get("2026-05-01").unwrap();
+        assert!(e.manual_override);
+        assert_eq!(e.hours, 0.0);
+    }
+
+    #[test]
+    fn finalize_recalcs_months() {
+        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5);
+        st.begin_edit();
+        st.editing = Some(String::new());
+        for c in "4:00".chars() { st.input_char(c); }
+        st.commit_edit(); // 1 maja = 4h
+        st.finalize_for_save();
+        assert!((st.summary.months.get("2026-05").unwrap().total_hours - 4.0).abs() < 1e-9);
+        assert!(!st.dirty); // dirty wyczyszczone po finalize
     }
 }
