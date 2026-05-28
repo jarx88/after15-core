@@ -76,14 +76,9 @@ pub fn draw(f: &mut Frame, st: &EditState) {
 
     f.render_widget(table, chunks[1]);
 
-    // Stopka
-    let month_key = format!("{}-{:02}", st.year, st.month);
-    let month_sum = st
-        .summary
-        .months
-        .get(&month_key)
-        .map(|m| m.formatted.clone())
-        .unwrap_or_else(|| "0:00".to_string());
+    // Stopka — suma liczona live z wierszy, żeby odzwierciedlać niezapisane edycje
+    let month_sum_hours: f64 = st.rows.iter().map(|r| r.hours).sum();
+    let month_sum = format_hm(month_sum_hours);
     let help = "↑↓ ruch · ←→ miesiąc · Enter edytuj · m flaga · s zapis · q wyjście";
     let footer = format!(" {}\n Σ miesiąc: {}   {}", help, month_sum, st.status);
     f.render_widget(

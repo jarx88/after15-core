@@ -51,6 +51,8 @@ struct DailySummary {
 struct DayData {
     hours: f64,
     #[serde(default)]
+    manual_override: bool,
+    #[serde(default)]
     projects: Option<HashMap<String, ProjectHoursJson>>,
 }
 
@@ -74,6 +76,16 @@ pub struct ProjectHours {
 pub struct DailySummaryData {
     pub hours: HashMap<NaiveDate, f64>,
     pub projects: HashMap<NaiveDate, HashMap<String, ProjectHours>>,
+}
+
+/// Wybiera autorytatywną liczbę godzin dnia: przy manual_override bierze stored
+/// `hours` (ręczna korekta z TUI), inaczej sumę przeliczoną z projektów.
+fn resolve_day_hours(manual_override: bool, stored_hours: f64, recalculated_hours: f64) -> f64 {
+    if manual_override {
+        stored_hours
+    } else {
+        recalculated_hours
+    }
 }
 
 pub fn load_daily_summary_full(config: &Config, debug: bool) -> DailySummaryData {
@@ -149,8 +161,13 @@ pub fn load_daily_summary_full(config: &Config, debug: bool) -> DailySummaryData
                     recalculated_hours += ph.weekday_hours + ph.weekend_hours;
                     day_projects.insert(proj_name, ph);
                 }
-                if recalculated_hours > 0.0 {
-                    result.hours.insert(date, recalculated_hours);
+                let day_hours = resolve_day_hours(
+                    day_data.manual_override,
+                    day_data.hours,
+                    recalculated_hours,
+                );
+                if day_hours > 0.0 {
+                    result.hours.insert(date, day_hours);
                 }
                 if !day_projects.is_empty() {
                     result.projects.insert(date, day_projects);
@@ -644,6 +661,18 @@ mod tests {
         let ts = "2026-01-28T06:58:16.234Z";
         let parsed = parse_timestamp(ts).unwrap();
         assert_eq!(parsed.to_string(), "2026-01-28 06:58:16");
+    }
+
+    #[test]
+    fn manual_override_uses_stored_hours_not_projects() {
+        // Dzień z ręczną korektą: stored 9.0, projekty sumują się do 2.5 → liczy się 9.0.
+        assert_eq!(resolve_day_hours(true, 9.0, 2.5), 9.0);
+    }
+
+    #[test]
+    fn without_manual_override_uses_recalculated_projects() {
+        // Bez flagi: ignoruje stored, bierze sumę z projektów.
+        assert_eq!(resolve_day_hours(false, 9.0, 2.5), 2.5);
     }
 
     #[test]
