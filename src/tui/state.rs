@@ -1,5 +1,55 @@
 // EditState i logika — uzupełniane w kolejnych taskach.
 
+use chrono::{Datelike, NaiveDate};
+use crate::archive::{format_hm, DailySummaryFile, DayEntry};
+use crate::schedule;
+
+#[derive(Clone)]
+pub struct DayRow {
+    pub date: NaiveDate,
+    pub hours: f64,
+    pub shift: String,
+    pub manual_override: bool,
+    pub existed: bool,
+    pub dirty: bool,
+}
+
+pub fn days_in_month(year: i32, month: u32) -> u32 {
+    let (ny, nm) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    let first_next = NaiveDate::from_ymd_opt(ny, nm, 1).unwrap();
+    let first_this = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+    first_next.signed_duration_since(first_this).num_days() as u32
+}
+
+pub fn build_rows(summary: &DailySummaryFile, year: i32, month: u32) -> Vec<DayRow> {
+    let n = days_in_month(year, month);
+    let mut rows = Vec::with_capacity(n as usize);
+    for d in 1..=n {
+        let date = NaiveDate::from_ymd_opt(year, month, d).unwrap();
+        let key = date.format("%Y-%m-%d").to_string();
+        if let Some(e) = summary.days.get(&key) {
+            rows.push(DayRow {
+                date,
+                hours: e.hours,
+                shift: e.shift.clone(),
+                manual_override: e.manual_override,
+                existed: true,
+                dirty: false,
+            });
+        } else {
+            rows.push(DayRow {
+                date,
+                hours: 0.0,
+                shift: schedule::shift_str(schedule::get_shift_type(date)).to_string(),
+                manual_override: false,
+                existed: false,
+                dirty: false,
+            });
+        }
+    }
+    rows
+}
+
 /// Parsuje godziny z formatu "H:MM" lub ułamka dziesiętnego ("2.5").
 /// Zwraca wartość zaokrągloną do 2 miejsc, w zakresie 0..=24.
 pub fn parse_hours(input: &str) -> Result<f64, String> {
@@ -29,6 +79,34 @@ pub fn parse_hours(input: &str) -> Result<f64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archive::{DailySummaryFile, DayEntry};
+
+    fn day(hours: f64, shift: &str, manual: bool) -> DayEntry {
+        DayEntry { hours, formatted: format_hm(hours), shift: shift.into(), processed: true, manual_override: manual, projects: None }
+    }
+
+    #[test]
+    fn days_in_month_handles_february_leap() {
+        assert_eq!(days_in_month(2024, 2), 29);
+        assert_eq!(days_in_month(2026, 2), 28);
+        assert_eq!(days_in_month(2026, 12), 31);
+    }
+
+    #[test]
+    fn build_rows_marks_existing_and_virtual() {
+        let mut s = DailySummaryFile::default();
+        s.days.insert("2026-05-02".to_string(), day(2.0, "afternoon", true));
+        let rows = build_rows(&s, 2026, 5);
+        assert_eq!(rows.len(), 31);
+        let r2 = &rows[1]; // 2 maja
+        assert!(r2.existed);
+        assert!(r2.manual_override);
+        assert!((r2.hours - 2.0).abs() < 1e-9);
+        assert_eq!(r2.shift, "afternoon");
+        let r1 = &rows[0]; // 1 maja — wirtualny
+        assert!(!r1.existed);
+        assert_eq!(r1.hours, 0.0);
+    }
 
     #[test]
     fn parse_hm_format() {
