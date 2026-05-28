@@ -98,6 +98,7 @@ cargo build --release
 ./target/release/after15 --month 2026-01    # Filter by month
 ./target/release/after15 --explain 2026-01-15  # Debug specific date
 ./target/release/after15 --pdf              # Generate PDF report
+./target/release/after15 --edit             # Interactive TUI: edit daily hours (sets manual_override)
 ./target/release/after15 --debug            # Verbose output
 
 # Test
