@@ -424,12 +424,7 @@ fn rebuild_archive(config: &config::Config, debug: bool) {
         let entry = archive::DayEntry {
             hours: round2(*hours),
             formatted: archive::format_hm(*hours),
-            shift: match shift_type {
-                schedule::ShiftType::Regular => "regular".to_string(),
-                schedule::ShiftType::Afternoon => "afternoon".to_string(),
-                schedule::ShiftType::Weekend => "weekend".to_string(),
-                schedule::ShiftType::SaturdayAfternoon => "saturday_afternoon".to_string(),
-            },
+            shift: schedule::shift_str(shift_type).to_string(),
             processed: true,
             manual_override: false,
             projects: projects_entry,

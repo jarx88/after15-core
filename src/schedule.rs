@@ -85,6 +85,15 @@ pub fn get_shift_type(date: NaiveDate) -> ShiftType {
     }
 }
 
+pub fn shift_str(t: ShiftType) -> &'static str {
+    match t {
+        ShiftType::Regular => "regular",
+        ShiftType::Afternoon => "afternoon",
+        ShiftType::Weekend => "weekend",
+        ShiftType::SaturdayAfternoon => "saturday_afternoon",
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct WorkWindow {
     pub start: NaiveTime,
@@ -211,5 +220,13 @@ mod tests {
         let sat = NaiveDate::from_ymd_opt(2025, 8, 2).unwrap();
         assert!(is_saturday_regular_hours(sat));
         assert_eq!(get_shift_type(sat), ShiftType::SaturdayAfternoon);
+    }
+
+    #[test]
+    fn shift_str_maps_all_variants() {
+        assert_eq!(shift_str(ShiftType::Regular), "regular");
+        assert_eq!(shift_str(ShiftType::Afternoon), "afternoon");
+        assert_eq!(shift_str(ShiftType::Weekend), "weekend");
+        assert_eq!(shift_str(ShiftType::SaturdayAfternoon), "saturday_afternoon");
     }
 }
