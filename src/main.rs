@@ -48,11 +48,19 @@ struct Cli {
 
     #[arg(long, help = "Z --project-totals: uwzględnij także godziny w ramach godzin pracy")]
     full: bool,
+
+    #[arg(long, help = "Interaktywna edycja dni (TUI)")]
+    edit: bool,
 }
 
 fn main() {
     let cli = Cli::parse();
     let config = config::load_config();
+
+    if cli.edit {
+        tui::run();
+        return;
+    }
 
     if cli.rebuild {
         rebuild_archive(&config, cli.debug);

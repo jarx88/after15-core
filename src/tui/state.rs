@@ -1,6 +1,6 @@
 // EditState i logika — uzupełniane w kolejnych taskach.
 
-use chrono::{Datelike, NaiveDate};
+use chrono::NaiveDate;
 use crate::archive::{format_hm, DailySummaryFile, DayEntry};
 use crate::schedule;
 
