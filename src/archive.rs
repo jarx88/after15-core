@@ -29,14 +29,26 @@ pub struct DayEntry {
     pub shift: String,
     #[serde(default)]
     pub processed: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub manual_override: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projects: Option<BTreeMap<String, ProjectHoursEntry>>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct ProjectHoursEntry {
     pub weekday_hours: f64,
     pub weekend_hours: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub regular_hours: f64,
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -288,6 +300,7 @@ pub fn archive_overtime(
 
         let should_update = match existing {
             None => true,
+            Some(entry) if entry.manual_override => false,
             Some(entry) => !entry.processed || entry.hours == 0.0,
         };
 
@@ -305,6 +318,7 @@ pub fn archive_overtime(
                         ProjectHoursEntry {
                             weekday_hours: round2(hours.weekday_hours),
                             weekend_hours: round2(hours.weekend_hours),
+                            regular_hours: round2(hours.regular_hours),
                         },
                     )
                 })
@@ -316,6 +330,7 @@ pub fn archive_overtime(
             formatted: format_hm(*hours),
             shift: shift_name(shift_type).to_string(),
             processed: true,
+            manual_override: false,
             projects: projects_entry,
         };
 

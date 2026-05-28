@@ -62,7 +62,10 @@ after15-core/
 - **5-min minimum** session duration (`MIN_SESSION_SECONDS = 300`)
 
 ### Project Extraction
-- Extracts from file paths containing `/Programowanie/`
+- Extracts from file paths containing `/Programowanie/` OR `/.t3/worktrees/<projekt>/<worktree>/`
+- t3 worktree sessions (`~/.claude/projects/-home-jarek--t3-worktrees-<projekt>-t3code-<hash>/`) are mapped to the same project pool as `~/Programowanie/<projekt>/` — godziny się sumują
+- Worktree case is gated on `~/Programowanie/<projekt>/` existing (strict — side-projekty spoza `Programowanie` nie są liczone)
+- Underscore fallback: session dir encodes `_` → `-`, więc `Eksozycja-apteki` w session dir matchuje `~/Programowanie/Eksozycja_apteki/`
 - Format: `-home-jarx-Programowanie-{project_name}`
 
 ### Data Paths

@@ -54,6 +54,75 @@ pub fn calculate_session_overtime(
     daily
 }
 
+pub fn calculate_session_regular(
+    session: &Session,
+    config: &Config,
+) -> HashMap<NaiveDate, f64> {
+    let mut daily: HashMap<NaiveDate, f64> = HashMap::new();
+
+    let start_local = session
+        .start_time
+        .and_utc()
+        .with_timezone(&Warsaw)
+        .naive_local();
+    let end_local = session
+        .end_time
+        .and_utc()
+        .with_timezone(&Warsaw)
+        .naive_local();
+
+    let mut current_date = start_local.date();
+    let end_date = end_local.date();
+
+    while current_date <= end_date {
+        let day_start = current_date.and_hms_opt(0, 0, 0).unwrap();
+        let day_end = current_date.and_hms_opt(23, 59, 59).unwrap();
+
+        let block_start = start_local.max(day_start);
+        let block_end = end_local.min(day_end);
+
+        if block_end > block_start {
+            let regular_seconds = calculate_regular_for_day(
+                current_date,
+                block_start.time(),
+                block_end.time(),
+                config,
+            );
+
+            if regular_seconds > 0.0 {
+                *daily.entry(current_date).or_insert(0.0) += regular_seconds / 3600.0;
+            }
+        }
+
+        current_date += Duration::days(1);
+    }
+
+    daily
+}
+
+fn calculate_regular_for_day(
+    date: NaiveDate,
+    start: NaiveTime,
+    end: NaiveTime,
+    config: &Config,
+) -> f64 {
+    let work_window = config
+        .work_window_override(date)
+        .or_else(|| get_regular_work_window(date));
+
+    if let Some(window) = work_window {
+        let regular_start = start.max(window.start);
+        let regular_end = end.min(window.end);
+        if regular_end > regular_start {
+            (regular_end - regular_start).num_seconds() as f64
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    }
+}
+
 fn calculate_overtime_for_day(
     date: NaiveDate,
     start: NaiveTime,

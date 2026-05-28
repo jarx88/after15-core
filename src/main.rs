@@ -41,6 +41,12 @@ struct Cli {
 
     #[arg(long, help = "Send daily_summary.json backup via Telegram")]
     backup: bool,
+
+    #[arg(long, help = "Pokaż sumę godzin per projekt od początku monitorowania")]
+    project_totals: bool,
+
+    #[arg(long, help = "Z --project-totals: uwzględnij także godziny w ramach godzin pracy")]
+    full: bool,
 }
 
 fn main() {
@@ -131,6 +137,11 @@ fn main() {
 
     archive::archive_overtime(&daily_hours, &daily_projects, cli.debug);
 
+    if cli.project_totals {
+        print_project_totals(&daily_projects, &config, cli.full);
+        return;
+    }
+
     if cli.pdf_telegram {
         match pdf::generate_pdf(&daily_projects, &config, cli.month.as_deref()) {
             Ok(path) => {
@@ -166,6 +177,196 @@ fn main() {
     }
 }
 
+fn print_project_totals(
+    daily_projects: &HashMap<chrono::NaiveDate, HashMap<String, jsonl::ProjectHours>>,
+    config: &config::Config,
+    full: bool,
+) {
+    use colored::*;
+
+    let tracked_path = &config.projects.tracked_path;
+    let hourly_weekday = config.salary.base_monthly_net / config.salary.hours_per_month
+        * config.salary.overtime_multiplier_weekday;
+    let hourly_weekend = config.salary.base_monthly_net / config.salary.hours_per_month
+        * config.salary.overtime_multiplier_weekend;
+
+    let mut totals: HashMap<String, jsonl::ProjectHours> = HashMap::new();
+    let mut first_seen: HashMap<String, chrono::NaiveDate> = HashMap::new();
+    let mut last_seen: HashMap<String, chrono::NaiveDate> = HashMap::new();
+
+    for (date, day_projects) in daily_projects {
+        for (proj_name, hours) in day_projects {
+            let normalized = report::normalize_project_name(proj_name, tracked_path);
+            if config.projects.excluded_projects.contains(&normalized) {
+                continue;
+            }
+            let activity = hours.weekday_hours + hours.weekend_hours + hours.regular_hours;
+            if activity < 0.0001 {
+                continue;
+            }
+            let entry = totals.entry(normalized.clone()).or_default();
+            entry.weekday_hours += hours.weekday_hours;
+            entry.weekend_hours += hours.weekend_hours;
+            entry.regular_hours += hours.regular_hours;
+
+            first_seen
+                .entry(normalized.clone())
+                .and_modify(|d| {
+                    if *date < *d {
+                        *d = *date;
+                    }
+                })
+                .or_insert(*date);
+            last_seen
+                .entry(normalized)
+                .and_modify(|d| {
+                    if *date > *d {
+                        *d = *date;
+                    }
+                })
+                .or_insert(*date);
+        }
+    }
+
+    if totals.is_empty() {
+        println!("{}", "Brak danych projektowych w archiwum.".red());
+        return;
+    }
+
+    let mut sorted: Vec<_> = totals.iter().collect();
+    sorted.sort_by(|a, b| {
+        let total_a = a.1.weekday_hours + a.1.weekend_hours
+            + if full { a.1.regular_hours } else { 0.0 };
+        let total_b = b.1.weekday_hours + b.1.weekend_hours
+            + if full { b.1.regular_hours } else { 0.0 };
+        total_b.partial_cmp(&total_a).unwrap()
+    });
+
+    let global_first = first_seen.values().min().copied();
+    let global_last = last_seen.values().max().copied();
+
+    println!();
+    let header_title = if full {
+        "[SUMA GODZIN PER PROJEKT — pełny kontekst (nadgodziny + godziny pracy)]"
+    } else {
+        "[SUMA GODZIN PER PROJEKT — od początku monitorowania]"
+    };
+    println!("{}", header_title.cyan().bold());
+    if let (Some(f), Some(l)) = (global_first, global_last) {
+        println!("Zakres danych: {} → {}", f, l);
+    }
+    if full {
+        println!(
+            "{}",
+            "Uwaga: \"W pracy\" pochodzi z retention JSONL (~365 dni); starsze dni mają 0:00."
+                .dimmed()
+                .to_string()
+        );
+    }
+    println!();
+
+    if full {
+        println!(
+            "{:<28} {:>8} {:>8} {:>8} {:>8} {:>10} {:>12} {:>12}",
+            "Projekt", "Dzień", "Weekend", "Nadg.", "W pracy", "PLN", "Pierwszy", "Ostatni"
+        );
+        println!("{}", "─".repeat(102));
+    } else {
+        println!(
+            "{:<28} {:>8} {:>8} {:>8} {:>10} {:>12} {:>12}",
+            "Projekt", "Dzień", "Weekend", "Suma", "PLN", "Pierwszy", "Ostatni"
+        );
+        println!("{}", "─".repeat(92));
+    }
+
+    let mut total_weekday = 0.0;
+    let mut total_weekend = 0.0;
+    let mut total_regular = 0.0;
+    let mut total_pln = 0.0;
+
+    for (name, hours) in &sorted {
+        let day_h = hours.weekday_hours;
+        let wk_h = hours.weekend_hours;
+        let reg_h = hours.regular_hours;
+        let overtime_sum = day_h + wk_h;
+        let pln = day_h * hourly_weekday + wk_h * hourly_weekend;
+        total_weekday += day_h;
+        total_weekend += wk_h;
+        total_regular += reg_h;
+        total_pln += pln;
+
+        let first = first_seen
+            .get(*name)
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let last = last_seen
+            .get(*name)
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "-".to_string());
+
+        if full {
+            println!(
+                "{:<28} {:>8} {:>8} {:>8} {:>8} {:>10} {:>12} {:>12}",
+                truncate_str(name, 28),
+                report::format_hm(day_h),
+                report::format_hm(wk_h),
+                report::format_hm(overtime_sum),
+                report::format_hm(reg_h),
+                format!("{:.0}", pln),
+                first,
+                last,
+            );
+        } else {
+            println!(
+                "{:<28} {:>8} {:>8} {:>8} {:>10} {:>12} {:>12}",
+                truncate_str(name, 28),
+                report::format_hm(day_h),
+                report::format_hm(wk_h),
+                report::format_hm(overtime_sum),
+                format!("{:.0}", pln),
+                first,
+                last,
+            );
+        }
+    }
+
+    if full {
+        println!("{}", "─".repeat(102));
+        let overtime_total = total_weekday + total_weekend;
+        let grand_total = overtime_total + total_regular;
+        println!(
+            "{:<28} {:>8} {:>8} {:>8} {:>8} {:>10}",
+            "SUMA".bold(),
+            report::format_hm(total_weekday),
+            report::format_hm(total_weekend),
+            report::format_hm(overtime_total),
+            report::format_hm(total_regular),
+            format!("{:.0}", total_pln).yellow().bold().to_string(),
+        );
+        println!(
+            "{}",
+            format!(
+                "Łącznie czasu nad projektami: {}",
+                report::format_hm(grand_total)
+            )
+            .yellow()
+            .bold()
+        );
+    } else {
+        println!("{}", "─".repeat(92));
+        let grand_total = total_weekday + total_weekend;
+        println!(
+            "{:<28} {:>8} {:>8} {:>8} {:>10}",
+            "SUMA".bold(),
+            report::format_hm(total_weekday),
+            report::format_hm(total_weekend),
+            report::format_hm(grand_total).yellow().bold().to_string(),
+            format!("{:.0}", total_pln).yellow().bold().to_string(),
+        );
+    }
+    println!();
+}
+
 fn rebuild_archive(config: &config::Config, debug: bool) {
     let _lock = archive::lock_archive();
     let fresh = jsonl::load_all_overtime(config, debug);
@@ -187,8 +388,21 @@ fn rebuild_archive(config: &config::Config, debug: bool) {
     let round2 = |v: f64| (v * 100.0).round() / 100.0;
 
     let mut overwritten_days = 0usize;
+    let mut skipped_manual = 0usize;
     for (date, hours) in &fresh.hours {
         let date_str = date.format("%Y-%m-%d").to_string();
+        if archive
+            .days
+            .get(&date_str)
+            .map(|e| e.manual_override)
+            .unwrap_or(false)
+        {
+            skipped_manual += 1;
+            if debug {
+                eprintln!("[DEBUG] Skip {} (manual_override)", date_str);
+            }
+            continue;
+        }
         let shift_type = schedule::get_shift_type(*date);
         let projects_entry = fresh.projects.get(date).map(|projs| {
             projs
@@ -199,6 +413,7 @@ fn rebuild_archive(config: &config::Config, debug: bool) {
                         archive::ProjectHoursEntry {
                             weekday_hours: round2(hours.weekday_hours),
                             weekend_hours: round2(hours.weekend_hours),
+                            regular_hours: round2(hours.regular_hours),
                         },
                     )
                 })
@@ -215,6 +430,7 @@ fn rebuild_archive(config: &config::Config, debug: bool) {
                 schedule::ShiftType::SaturdayAfternoon => "saturday_afternoon".to_string(),
             },
             processed: true,
+            manual_override: false,
             projects: projects_entry,
         };
 
@@ -241,11 +457,15 @@ fn rebuild_archive(config: &config::Config, debug: bool) {
         );
     }
 
-    let preserved_days = archive.days.len().saturating_sub(overwritten_days);
+    let preserved_days = archive
+        .days
+        .len()
+        .saturating_sub(overwritten_days)
+        .saturating_sub(skipped_manual);
     match archive::save_summary(&archive) {
         Ok(()) => println!(
-            "Przebudowano archiwum: {} dni z JSONL, {} dni zachowanych z archiwum",
-            overwritten_days, preserved_days
+            "Przebudowano archiwum: {} dni z JSONL, {} dni zachowanych z archiwum, {} dni z ręczną korektą (manual_override)",
+            overwritten_days, preserved_days, skipped_manual
         ),
         Err(e) => {
             eprintln!("[BŁĄD] Nie udało się zapisać archiwum: {}", e);

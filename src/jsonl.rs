@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::config::Config;
-use crate::overtime::calculate_session_overtime;
+use crate::overtime::{calculate_session_overtime, calculate_session_regular};
 use crate::report::normalize_project_name;
 use crate::schedule::is_weekend;
 
@@ -60,12 +60,15 @@ struct ProjectHoursJson {
     weekday_hours: f64,
     #[serde(default)]
     weekend_hours: f64,
+    #[serde(default)]
+    regular_hours: f64,
 }
 
 #[derive(Clone, Default)]
 pub struct ProjectHours {
     pub weekday_hours: f64,
     pub weekend_hours: f64,
+    pub regular_hours: f64,
 }
 
 pub struct DailySummaryData {
@@ -141,6 +144,7 @@ pub fn load_daily_summary_full(config: &Config, debug: bool) -> DailySummaryData
                     let ph = ProjectHours {
                         weekday_hours: proj_hours.weekday_hours,
                         weekend_hours: proj_hours.weekend_hours,
+                        regular_hours: proj_hours.regular_hours,
                     };
                     recalculated_hours += ph.weekday_hours + ph.weekend_hours;
                     day_projects.insert(proj_name, ph);
@@ -360,6 +364,7 @@ fn load_overtime_from_files(
     for session in sessions {
         let filter = date_filter.unwrap_or(session.start_time.date());
         let overtime = calculate_session_overtime(&session, filter, config, debug);
+        let regular = calculate_session_regular(&session, config);
 
         let real_projects: HashMap<String, usize> = session
             .project_counts
@@ -399,6 +404,27 @@ fn load_overtime_from_files(
                     } else {
                         proj_entry.weekday_hours += proj_hours;
                     }
+                }
+            }
+        }
+
+        for (date, reg_hours) in regular {
+            let dominated = date_filter.map(|f| date != f).unwrap_or(false);
+            if dominated || reg_hours <= 0.0 {
+                continue;
+            }
+
+            let day_projects = result.projects.entry(date).or_default();
+
+            if total_records == 0 {
+                let proj_entry = day_projects.entry("unknown".to_string()).or_default();
+                proj_entry.regular_hours += reg_hours;
+            } else {
+                for (proj_name, &count) in &real_projects {
+                    let fraction = count as f64 / total_records as f64;
+                    let proj_hours = reg_hours * fraction;
+                    let proj_entry = day_projects.entry(proj_name.clone()).or_default();
+                    proj_entry.regular_hours += proj_hours;
                 }
             }
         }
@@ -448,6 +474,36 @@ fn collect_timestamps_from_file(path: &Path) -> Vec<TimestampRecord> {
     records
 }
 
+const PROGRAMOWANIE_DIR: &str = "Programowanie";
+const WORKTREE_PATH_MARKER: &str = "/.t3/worktrees/";
+const WORKTREE_DIR_PREFIX: &str = "--t3-worktrees-";
+const WORKTREE_DIR_SUFFIX: &str = "-t3code-";
+
+fn extract_worktree_project_name(encoded: &str) -> Option<&str> {
+    let after = encoded.split_once(WORKTREE_DIR_PREFIX)?.1;
+    after
+        .split_once(WORKTREE_DIR_SUFFIX)
+        .map(|(name, _)| name)
+        .filter(|s| !s.is_empty())
+}
+
+fn extract_worktree_project_from_filepath(file_path: &str) -> Option<&str> {
+    let after = file_path.split_once(WORKTREE_PATH_MARKER)?.1;
+    after.split('/').next().filter(|s| !s.is_empty())
+}
+
+fn worktree_project_exists_in_programowanie(project: &str) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let prog_dir = home.join(PROGRAMOWANIE_DIR);
+    if prog_dir.join(project).is_dir() {
+        return true;
+    }
+    let with_underscore = project.replace('-', "_");
+    prog_dir.join(with_underscore).is_dir()
+}
+
 fn extract_project_from_tool_input(entry: &JsonlEntry) -> Option<String> {
     let tool_input = entry.tool_input.as_ref()?;
 
@@ -457,21 +513,16 @@ fn extract_project_from_tool_input(entry: &JsonlEntry) -> Option<String> {
         .or(tool_input.path.as_ref())
         .or(tool_input.workdir.as_ref())?;
 
-    if !file_path.contains("/Programowanie/") {
+    let project_name = if let Some((_, after)) = file_path.split_once("/Programowanie/") {
+        after.split('/').next().filter(|s| !s.is_empty())?
+    } else if let Some(name) = extract_worktree_project_from_filepath(file_path) {
+        if !worktree_project_exists_in_programowanie(name) {
+            return None;
+        }
+        name
+    } else {
         return None;
-    }
-
-    let parts: Vec<&str> = file_path.split("/Programowanie/").collect();
-    if parts.len() < 2 {
-        return None;
-    }
-
-    let after_prog = parts[1];
-    let project_name = after_prog.split('/').next()?;
-
-    if project_name.is_empty() {
-        return None;
-    }
+    };
 
     let normalized = project_name.replace('_', "-");
     Some(format!("-home-jarx-Programowanie-{}", normalized))
@@ -571,6 +622,12 @@ fn extract_project_name(path: &Path) -> String {
             .unwrap_or_default();
 
         if !parent_name.is_empty() && parent_name != "projects" {
+            if let Some(project) = extract_worktree_project_name(&parent_name) {
+                if worktree_project_exists_in_programowanie(project) {
+                    let normalized = project.replace('_', "-");
+                    return format!("-home-jarx-Programowanie-{}", normalized);
+                }
+            }
             return parent_name;
         }
     }
@@ -596,5 +653,52 @@ mod tests {
         );
         let name = extract_project_name(path);
         assert_eq!(name, "-home-jarx-Programowanie-farmaster2");
+    }
+
+    #[test]
+    fn test_extract_worktree_project_name_helper() {
+        assert_eq!(
+            extract_worktree_project_name("-home-jarek--t3-worktrees-farmaster2-t3code-0b257d0d"),
+            Some("farmaster2")
+        );
+        assert_eq!(
+            extract_worktree_project_name(
+                "-home-jarek--t3-worktrees-Eksozycja-apteki-t3code-09aba15b"
+            ),
+            Some("Eksozycja-apteki")
+        );
+        assert_eq!(
+            extract_worktree_project_name("-home-jarek-Programowanie-farmaster2"),
+            None
+        );
+        assert_eq!(extract_worktree_project_name("random-string"), None);
+        assert_eq!(
+            extract_worktree_project_name("-home-jarek--t3-worktrees--t3code-XXXX"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_worktree_project_from_filepath_helper() {
+        assert_eq!(
+            extract_worktree_project_from_filepath(
+                "/home/jarek/.t3/worktrees/farmaster2/t3code-0b257d0d/backend/file.rs"
+            ),
+            Some("farmaster2")
+        );
+        assert_eq!(
+            extract_worktree_project_from_filepath(
+                "/home/jarek/.t3/worktrees/Eksozycja-apteki/t3code-09aba15b/src/main.rs"
+            ),
+            Some("Eksozycja-apteki")
+        );
+        assert_eq!(
+            extract_worktree_project_from_filepath("/home/jarek/Programowanie/farmaster2/file.rs"),
+            None
+        );
+        assert_eq!(
+            extract_worktree_project_from_filepath("/home/jarek/.t3/worktrees//file.rs"),
+            None
+        );
     }
 }

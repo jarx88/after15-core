@@ -277,10 +277,7 @@ fn print_project_tables(
                 continue;
             }
 
-            let proj_entry = month_entry.entry(normalized).or_insert(ProjectHours {
-                weekday_hours: 0.0,
-                weekend_hours: 0.0,
-            });
+            let proj_entry = month_entry.entry(normalized).or_default();
             proj_entry.weekday_hours += hours.weekday_hours;
             proj_entry.weekend_hours += hours.weekend_hours;
 
