@@ -278,6 +278,27 @@ fn shift_name(shift_type: ShiftType) -> &'static str {
     }
 }
 
+pub fn recalc_months(summary: &mut DailySummaryFile) {
+    let mut monthly_totals: BTreeMap<String, f64> = BTreeMap::new();
+    for (date_str, entry) in &summary.days {
+        if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+            let month_key = format!("{}-{:02}", date.year(), date.month());
+            *monthly_totals.entry(month_key).or_insert(0.0) += entry.hours;
+        }
+    }
+
+    summary.months.clear();
+    for (month, total) in monthly_totals {
+        summary.months.insert(
+            month,
+            MonthEntry {
+                total_hours: round2(total),
+                formatted: format_hm(total),
+            },
+        );
+    }
+}
+
 pub fn archive_overtime(
     daily_hours: &HashMap<NaiveDate, f64>,
     daily_projects: &HashMap<NaiveDate, HashMap<String, ProjectHours>>,
@@ -342,24 +363,7 @@ pub fn archive_overtime(
         }
     }
 
-    let mut monthly_totals: BTreeMap<String, f64> = BTreeMap::new();
-    for (date_str, entry) in &summary.days {
-        if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-            let month_key = format!("{}-{:02}", date.year(), date.month());
-            *monthly_totals.entry(month_key).or_insert(0.0) += entry.hours;
-        }
-    }
-
-    summary.months.clear();
-    for (month, total) in monthly_totals {
-        summary.months.insert(
-            month,
-            MonthEntry {
-                total_hours: round2(total),
-                formatted: format_hm(total),
-            },
-        );
-    }
+    recalc_months(&mut summary);
 
     if updated_count > 0 {
         if let Err(e) = save_summary(&summary) {
@@ -370,5 +374,22 @@ pub fn archive_overtime(
                 updated_count
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod recalc_tests {
+    use super::*;
+
+    #[test]
+    fn recalc_months_sums_days_per_month() {
+        let mut s = DailySummaryFile::default();
+        s.days.insert("2026-05-10".to_string(), DayEntry { hours: 2.0, formatted: "2:00".into(), shift: "regular".into(), processed: true, manual_override: false, projects: None });
+        s.days.insert("2026-05-11".to_string(), DayEntry { hours: 1.5, formatted: "1:30".into(), shift: "regular".into(), processed: true, manual_override: false, projects: None });
+        s.days.insert("2026-04-01".to_string(), DayEntry { hours: 3.0, formatted: "3:00".into(), shift: "regular".into(), processed: true, manual_override: false, projects: None });
+        recalc_months(&mut s);
+        assert!((s.months.get("2026-05").unwrap().total_hours - 3.5).abs() < 1e-9);
+        assert!((s.months.get("2026-04").unwrap().total_hours - 3.0).abs() < 1e-9);
+        assert_eq!(s.months.get("2026-05").unwrap().formatted, "3:30");
     }
 }
