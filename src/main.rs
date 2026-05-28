@@ -5,6 +5,7 @@ mod overtime;
 mod pdf;
 mod report;
 mod schedule;
+mod tui;
 
 use chrono::{Datelike, Local};
 use clap::Parser;
