@@ -50,6 +50,166 @@ pub fn build_rows(summary: &DailySummaryFile, year: i32, month: u32) -> Vec<DayR
     rows
 }
 
+pub struct EditState {
+    pub summary: DailySummaryFile,
+    pub year: i32,
+    pub month: u32,
+    pub rows: Vec<DayRow>,
+    pub cursor: usize,
+    pub editing: Option<String>,
+    pub status: String,
+    pub dirty: bool,
+}
+
+impl EditState {
+    pub fn new(summary: DailySummaryFile, year: i32, month: u32) -> Self {
+        let rows = build_rows(&summary, year, month);
+        EditState {
+            summary,
+            year,
+            month,
+            rows,
+            cursor: 0,
+            editing: None,
+            status: String::new(),
+            dirty: false,
+        }
+    }
+
+    fn reload_rows(&mut self) {
+        self.rows = build_rows(&self.summary, self.year, self.month);
+        if self.cursor >= self.rows.len() {
+            self.cursor = self.rows.len().saturating_sub(1);
+        }
+    }
+
+    pub fn move_up(&mut self) {
+        if self.editing.is_some() { return; }
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn move_down(&mut self) {
+        if self.editing.is_some() { return; }
+        if self.cursor + 1 < self.rows.len() {
+            self.cursor += 1;
+        }
+    }
+
+    pub fn prev_month(&mut self) {
+        if self.editing.is_some() { return; }
+        if self.month == 1 { self.year -= 1; self.month = 12; } else { self.month -= 1; }
+        self.cursor = 0;
+        self.reload_rows();
+    }
+
+    pub fn next_month(&mut self) {
+        if self.editing.is_some() { return; }
+        if self.month == 12 { self.year += 1; self.month = 1; } else { self.month += 1; }
+        self.cursor = 0;
+        self.reload_rows();
+    }
+
+    pub fn begin_edit(&mut self) {
+        if self.rows.is_empty() { return; }
+        let row = &self.rows[self.cursor];
+        // prefill bieżącą wartością w formacie H:MM
+        self.editing = Some(format_hm(row.hours));
+        self.status.clear();
+    }
+
+    pub fn input_char(&mut self, c: char) {
+        if let Some(buf) = self.editing.as_mut() {
+            if c.is_ascii_digit() || c == ':' || c == '.' {
+                buf.push(c);
+            }
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        if let Some(buf) = self.editing.as_mut() {
+            buf.pop();
+        }
+    }
+
+    pub fn cancel_edit(&mut self) {
+        self.editing = None;
+        self.status.clear();
+    }
+
+    pub fn commit_edit(&mut self) {
+        let Some(buf) = self.editing.clone() else { return; };
+        match parse_hours(&buf) {
+            Ok(hours) => {
+                let row = &mut self.rows[self.cursor];
+                row.hours = hours;
+                row.manual_override = true;
+                row.dirty = true;
+                row.existed = true;
+                let key = row.date.format("%Y-%m-%d").to_string();
+                let shift = row.shift.clone();
+
+                let entry = self.summary.days.entry(key).or_insert_with(|| DayEntry {
+                    hours: 0.0,
+                    formatted: String::new(),
+                    shift: shift.clone(),
+                    processed: true,
+                    manual_override: false,
+                    projects: None,
+                });
+                entry.hours = hours;
+                entry.formatted = format_hm(hours);
+                entry.processed = true;
+                entry.manual_override = true;
+                // projects pozostają nietknięte (zachowane dla istniejących dni)
+
+                self.dirty = true;
+                self.editing = None;
+                self.status = format!("zapisano w pamięci: {}", format_hm(hours));
+            }
+            Err(e) => {
+                self.status = format!("błąd: {}", e);
+                // editing pozostaje — użytkownik poprawia
+            }
+        }
+    }
+
+    pub fn toggle_manual(&mut self) {
+        if self.editing.is_some() || self.rows.is_empty() { return; }
+        let row = &mut self.rows[self.cursor];
+        let new_val = !row.manual_override;
+        row.manual_override = new_val;
+        row.dirty = true;
+        row.existed = true;
+        let key = row.date.format("%Y-%m-%d").to_string();
+        let shift = row.shift.clone();
+        let hours = row.hours;
+
+        let entry = self.summary.days.entry(key).or_insert_with(|| DayEntry {
+            hours,
+            formatted: format_hm(hours),
+            shift,
+            processed: true,
+            manual_override: false,
+            projects: None,
+        });
+        entry.manual_override = new_val;
+        self.dirty = true;
+        self.status = if new_val {
+            "flaga manual_override = ON".to_string()
+        } else {
+            "flaga manual_override = OFF".to_string()
+        };
+    }
+
+    /// Przelicza sumy miesięczne i czyści dirty. Zwraca referencję do summary
+    /// gotowego do zapisu przez archive::save_summary.
+    pub fn finalize_for_save(&mut self) -> &DailySummaryFile {
+        crate::archive::recalc_months(&mut self.summary);
+        self.dirty = false;
+        &self.summary
+    }
+}
+
 /// Parsuje godziny z formatu "H:MM" lub ułamka dziesiętnego ("2.5").
 /// Zwraca wartość zaokrągloną do 2 miejsc, w zakresie 0..=24.
 pub fn parse_hours(input: &str) -> Result<f64, String> {
@@ -134,5 +294,47 @@ mod tests {
     fn parse_rejects_out_of_range() {
         assert!(parse_hours("25").is_err());
         assert!(parse_hours("-1").is_err());
+    }
+
+    #[test]
+    fn new_starts_on_first_day() {
+        let s = DailySummaryFile::default();
+        let st = EditState::new(s, 2026, 5);
+        assert_eq!(st.cursor, 0);
+        assert_eq!(st.rows.len(), 31);
+        assert!(!st.dirty);
+    }
+
+    #[test]
+    fn navigation_clamps() {
+        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5);
+        st.move_up(); // już na 0 — bez zmian
+        assert_eq!(st.cursor, 0);
+        for _ in 0..100 { st.move_down(); }
+        assert_eq!(st.cursor, st.rows.len() - 1);
+    }
+
+    #[test]
+    fn month_switch_rebuilds_rows_and_resets_cursor() {
+        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5);
+        st.cursor = 10;
+        st.prev_month();
+        assert_eq!(st.year, 2026);
+        assert_eq!(st.month, 4);
+        assert_eq!(st.cursor, 0);
+        assert_eq!(st.rows.len(), 30);
+        st.next_month();
+        st.next_month();
+        assert_eq!(st.month, 6);
+    }
+
+    #[test]
+    fn month_switch_wraps_year() {
+        let mut st = EditState::new(DailySummaryFile::default(), 2026, 12);
+        st.next_month();
+        assert_eq!((st.year, st.month), (2027, 1));
+        st.prev_month();
+        st.prev_month();
+        assert_eq!((st.year, st.month), (2026, 11));
     }
 }
