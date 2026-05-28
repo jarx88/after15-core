@@ -1,6 +1,7 @@
 // EditState i logika — uzupełniane w kolejnych taskach.
 
 use chrono::NaiveDate;
+use std::collections::HashSet;
 use crate::archive::{format_hm, DailySummaryFile, DayEntry};
 use crate::schedule;
 
@@ -59,6 +60,7 @@ pub struct EditState {
     pub editing: Option<String>,
     pub status: String,
     pub dirty: bool,
+    pub edited: HashSet<String>,
 }
 
 impl EditState {
@@ -73,6 +75,7 @@ impl EditState {
             editing: None,
             status: String::new(),
             dirty: false,
+            edited: HashSet::new(),
         }
     }
 
@@ -112,8 +115,8 @@ impl EditState {
     pub fn begin_edit(&mut self) {
         if self.rows.is_empty() { return; }
         let row = &self.rows[self.cursor];
-        // prefill bieżącą wartością w formacie H:MM (pusta dla 0h — nowy/wirtualny dzień)
-        let prefill = if row.hours == 0.0 {
+        // prefill bieżącą wartością w formacie H:MM (pusta dla nowych/wirtualnych dni)
+        let prefill = if !row.existed {
             String::new()
         } else {
             format_hm(row.hours)
@@ -153,6 +156,7 @@ impl EditState {
                 let key = row.date.format("%Y-%m-%d").to_string();
                 let shift = row.shift.clone();
 
+                self.edited.insert(key.clone());
                 let entry = self.summary.days.entry(key).or_insert_with(|| DayEntry {
                     hours: 0.0,
                     formatted: String::new(),
@@ -189,6 +193,7 @@ impl EditState {
         let shift = row.shift.clone();
         let hours = row.hours;
 
+        self.edited.insert(key.clone());
         let entry = self.summary.days.entry(key).or_insert_with(|| DayEntry {
             hours,
             formatted: format_hm(hours),
@@ -206,12 +211,25 @@ impl EditState {
         };
     }
 
-    /// Przelicza sumy miesięczne i czyści dirty. Zwraca referencję do summary
-    /// gotowego do zapisu przez archive::save_summary.
-    pub fn finalize_for_save(&mut self) -> &DailySummaryFile {
-        crate::archive::recalc_months(&mut self.summary);
+    /// Łączy edycje tej sesji na świeży stan wczytany z dysku (pod lockiem),
+    /// przelicza sumy miesięczne i czyści dirty. Po wywołaniu self.summary == zwrócony stan.
+    /// Caller musi potem przeładować wiersze (refresh_rows).
+    pub fn apply_edits(&mut self, fresh: DailySummaryFile) -> &DailySummaryFile {
+        let mut fresh = fresh;
+        for key in &self.edited {
+            if let Some(entry) = self.summary.days.get(key) {
+                fresh.days.insert(key.clone(), entry.clone());
+            }
+        }
+        crate::archive::recalc_months(&mut fresh);
+        self.summary = fresh;
         self.dirty = false;
+        self.edited.clear();
         &self.summary
+    }
+
+    pub fn refresh_rows(&mut self) {
+        self.reload_rows();
     }
 }
 
@@ -433,14 +451,72 @@ mod tests {
     }
 
     #[test]
-    fn finalize_recalcs_months() {
+    fn apply_edits_recalcs_months() {
         let mut st = EditState::new(DailySummaryFile::default(), 2026, 5);
         st.begin_edit();
         st.editing = Some(String::new());
         for c in "4:00".chars() { st.input_char(c); }
         st.commit_edit(); // 1 maja = 4h
-        st.finalize_for_save();
+        st.apply_edits(DailySummaryFile::default());
         assert!((st.summary.months.get("2026-05").unwrap().total_hours - 4.0).abs() < 1e-9);
-        assert!(!st.dirty); // dirty wyczyszczone po finalize
+        assert!(!st.dirty); // dirty wyczyszczone po apply_edits
+    }
+
+    #[test]
+    fn commit_edit_on_existing_day_overwrites_and_preserves_shift_processed() {
+        let mut s = DailySummaryFile::default();
+        s.days.insert("2026-05-05".to_string(), DayEntry {
+            hours: 1.0,
+            formatted: "1:00".into(),
+            shift: "afternoon".into(),
+            processed: true,
+            manual_override: false,
+            projects: None,
+        });
+        let mut st = EditState::new(s, 2026, 5);
+        st.cursor = 4; // 5 maja (index 4)
+        st.begin_edit();
+        st.editing = Some(String::new());
+        for c in "2:30".chars() { st.input_char(c); }
+        st.commit_edit();
+        let e = st.summary.days.get("2026-05-05").unwrap();
+        assert!((e.hours - 2.5).abs() < 1e-9);
+        assert_eq!(e.shift, "afternoon");
+        assert!(e.processed);
+        assert!(e.manual_override);
+    }
+
+    #[test]
+    fn parse_hours_boundary() {
+        assert!((parse_hours("24:00").unwrap() - 24.0).abs() < 1e-9);
+        assert!(parse_hours("24:01").is_err());
+    }
+
+    #[test]
+    fn apply_edits_merges_onto_concurrent_state() {
+        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5);
+        st.cursor = 0; // 1 maja
+        st.begin_edit();
+        st.editing = Some(String::new());
+        for c in "3:00".chars() { st.input_char(c); }
+        st.commit_edit();
+
+        // "concurrent writer" wrote day 20 but NOT day 1
+        let mut fresh = DailySummaryFile::default();
+        fresh.days.insert("2026-05-20".to_string(), DayEntry {
+            hours: 2.0,
+            formatted: "2:00".into(),
+            shift: "regular".into(),
+            processed: true,
+            manual_override: false,
+            projects: None,
+        });
+
+        st.apply_edits(fresh);
+
+        let e01 = st.summary.days.get("2026-05-01").expect("edit day 1 must be present");
+        assert!((e01.hours - 3.0).abs() < 1e-9, "edited day should be 3h");
+        let e20 = st.summary.days.get("2026-05-20").expect("concurrent day 20 must be present");
+        assert!((e20.hours - 2.0).abs() < 1e-9, "concurrent day should be 2h");
     }
 }

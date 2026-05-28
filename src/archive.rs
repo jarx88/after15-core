@@ -6,7 +6,7 @@ use std::fs::{self, File};
 use std::path::PathBuf;
 
 use crate::jsonl::ProjectHours;
-use crate::schedule::{get_shift_type, ShiftType};
+use crate::schedule::get_shift_type;
 
 fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
@@ -269,14 +269,6 @@ pub fn format_hm(hours: f64) -> String {
     format!("{}:{:02}", h, m)
 }
 
-fn shift_name(shift_type: ShiftType) -> &'static str {
-    match shift_type {
-        ShiftType::Regular => "regular",
-        ShiftType::Afternoon => "afternoon",
-        ShiftType::Weekend => "weekend",
-        ShiftType::SaturdayAfternoon => "saturday_afternoon",
-    }
-}
 
 pub fn recalc_months(summary: &mut DailySummaryFile) {
     let mut monthly_totals: BTreeMap<String, f64> = BTreeMap::new();
@@ -349,7 +341,7 @@ pub fn archive_overtime(
         let entry = DayEntry {
             hours: round2(*hours),
             formatted: format_hm(*hours),
-            shift: shift_name(shift_type).to_string(),
+            shift: crate::schedule::shift_str(shift_type).to_string(),
             processed: true,
             manual_override: false,
             projects: projects_entry,

@@ -5,7 +5,7 @@ use std::io;
 
 use chrono::{Datelike, Local};
 use ratatui::crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -27,14 +27,14 @@ pub fn run() {
 fn run_loop(st: &mut EditState) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let res = event_loop(&mut terminal, st);
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     res
 }
@@ -74,11 +74,15 @@ fn event_loop<B: ratatui::backend::Backend>(
                 }
             }
             KeyCode::Char('s') => {
-                let summary = st.finalize_for_save();
-                match archive::save_summary(summary) {
-                    Ok(()) => st.status = "zapisano na dysk ✓".to_string(),
-                    Err(e) => st.status = format!("BŁĄD ZAPISU: {}", e),
-                }
+                let _lock = archive::lock_archive();
+                let fresh = archive::load_summary();
+                let res = { let merged = st.apply_edits(fresh); archive::save_summary(merged) };
+                drop(_lock);
+                st.status = match res {
+                    Ok(()) => "zapisano na dysk ✓".to_string(),
+                    Err(e) => format!("BŁĄD ZAPISU: {}", e),
+                };
+                st.refresh_rows();
             }
             KeyCode::Char('m') => st.toggle_manual(),
             KeyCode::Up => st.move_up(),
@@ -103,9 +107,14 @@ fn confirm_quit<B: ratatui::backend::Backend>(
     match key.code {
         KeyCode::Char('q') => Ok(true),
         KeyCode::Char('s') => {
-            let summary = st.finalize_for_save();
-            let _ = archive::save_summary(summary);
-            Ok(true)
+            let _lock = archive::lock_archive();
+            let fresh = archive::load_summary();
+            let res = { let merged = st.apply_edits(fresh); archive::save_summary(merged) };
+            drop(_lock);
+            match res {
+                Ok(()) => Ok(true),
+                Err(e) => { st.status = format!("BŁĄD ZAPISU: {}", e); st.refresh_rows(); Ok(false) }
+            }
         }
         _ => {
             st.status.clear();
