@@ -22,7 +22,7 @@ pub struct DailySummaryFile {
     pub months: BTreeMap<String, MonthEntry>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct DayEntry {
     pub hours: f64,
     pub formatted: String,
@@ -33,6 +33,8 @@ pub struct DayEntry {
     pub manual_override: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projects: Option<BTreeMap<String, ProjectHoursEntry>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_sessions: Vec<String>,
 }
 
 fn is_false(v: &bool) -> bool {
@@ -155,6 +157,7 @@ pub fn day_entry(
                 })
                 .collect()
         }),
+        excluded_sessions: Vec::new(),
     }
 }
 
@@ -385,8 +388,7 @@ pub fn archive_overtime(
             shift: crate::schedule::shift_str(shift_type).to_string(),
             processed: true,
             manual_override: false,
-            projects: projects_entry,
-        };
+            projects: projects_entry, ..Default::default() };
 
         summary.days.insert(date_str.clone(), entry);
         updated_count += 1;
@@ -417,9 +419,9 @@ mod recalc_tests {
     #[test]
     fn recalc_months_sums_days_per_month() {
         let mut s = DailySummaryFile::default();
-        s.days.insert("2026-05-10".to_string(), DayEntry { hours: 2.0, formatted: "2:00".into(), shift: "regular".into(), processed: true, manual_override: false, projects: None });
-        s.days.insert("2026-05-11".to_string(), DayEntry { hours: 1.5, formatted: "1:30".into(), shift: "regular".into(), processed: true, manual_override: false, projects: None });
-        s.days.insert("2026-04-01".to_string(), DayEntry { hours: 3.0, formatted: "3:00".into(), shift: "regular".into(), processed: true, manual_override: false, projects: None });
+        s.days.insert("2026-05-10".to_string(), DayEntry { hours: 2.0, formatted: "2:00".into(), shift: "regular".into(), processed: true, manual_override: false, projects: None, ..Default::default() });
+        s.days.insert("2026-05-11".to_string(), DayEntry { hours: 1.5, formatted: "1:30".into(), shift: "regular".into(), processed: true, manual_override: false, projects: None, ..Default::default() });
+        s.days.insert("2026-04-01".to_string(), DayEntry { hours: 3.0, formatted: "3:00".into(), shift: "regular".into(), processed: true, manual_override: false, projects: None, ..Default::default() });
         recalc_months(&mut s);
         assert!((s.months.get("2026-05").unwrap().total_hours - 3.5).abs() < 1e-9);
         assert!((s.months.get("2026-04").unwrap().total_hours - 3.0).abs() < 1e-9);

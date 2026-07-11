@@ -257,6 +257,7 @@ struct DayResponse {
     computed_hours: f64,
     manual_override: bool,
     stored_hours: Option<f64>,
+    excluded_sessions: Vec<String>,
 }
 
 #[derive(Default)]
@@ -386,12 +387,17 @@ fn day_response(date: NaiveDate, config: &config::Config) -> Result<Json<DayResp
         computed_hours: computed.hours,
         manual_override: stored.is_some_and(|day| day.manual_override),
         stored_hours: stored.map(|day| day.hours),
+        excluded_sessions: stored
+            .map(|day| day.excluded_sessions.clone())
+            .unwrap_or_default(),
     }))
 }
 
 #[derive(Deserialize)]
 struct HoursInput {
     hours: String,
+    #[serde(default)]
+    exclude_session: Option<String>,
 }
 
 async fn put_day(
@@ -411,6 +417,11 @@ async fn put_day(
         entry.formatted = archive::format_hm(hours);
         entry.processed = true;
         entry.manual_override = true;
+        if let Some(key) = input.exclude_session {
+            if !entry.excluded_sessions.contains(&key) {
+                entry.excluded_sessions.push(key);
+            }
+        }
         Ok(())
     })
     .await

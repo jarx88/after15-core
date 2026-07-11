@@ -163,8 +163,7 @@ impl EditState {
                     shift: shift.clone(),
                     processed: true,
                     manual_override: false,
-                    projects: None,
-                });
+                    projects: None, ..Default::default() });
                 entry.hours = hours;
                 entry.formatted = format_hm(hours);
                 entry.processed = true;
@@ -200,8 +199,7 @@ impl EditState {
             shift,
             processed: true,
             manual_override: false,
-            projects: None,
-        });
+            projects: None, ..Default::default() });
         entry.manual_override = new_val;
         self.dirty = true;
         self.status = if new_val {
@@ -265,7 +263,7 @@ mod tests {
     use crate::archive::{DailySummaryFile, DayEntry};
 
     fn day(hours: f64, shift: &str, manual: bool) -> DayEntry {
-        DayEntry { hours, formatted: format_hm(hours), shift: shift.into(), processed: true, manual_override: manual, projects: None }
+        DayEntry { hours, formatted: format_hm(hours), shift: shift.into(), processed: true, manual_override: manual, projects: None, ..Default::default() }
     }
 
     #[test]
@@ -412,7 +410,7 @@ mod tests {
         let mut s = DailySummaryFile::default();
         let mut proj = std::collections::BTreeMap::new();
         proj.insert("farmaster".to_string(), crate::archive::ProjectHoursEntry::default());
-        s.days.insert("2026-05-03".to_string(), DayEntry { hours: 1.0, formatted: "1:00".into(), shift: "regular".into(), processed: true, manual_override: false, projects: Some(proj) });
+        s.days.insert("2026-05-03".to_string(), DayEntry { hours: 1.0, formatted: "1:00".into(), shift: "regular".into(), processed: true, manual_override: false, projects: Some(proj), ..Default::default() });
         let mut st = EditState::new(s, 2026, 5);
         st.cursor = 2; // 3 maja
         st.begin_edit();
@@ -427,7 +425,7 @@ mod tests {
     #[test]
     fn toggle_manual_on_existing_day() {
         let mut s = DailySummaryFile::default();
-        s.days.insert("2026-05-04".to_string(), DayEntry { hours: 2.0, formatted: "2:00".into(), shift: "regular".into(), processed: true, manual_override: false, projects: None });
+        s.days.insert("2026-05-04".to_string(), DayEntry { hours: 2.0, formatted: "2:00".into(), shift: "regular".into(), processed: true, manual_override: false, projects: None, ..Default::default() });
         let mut st = EditState::new(s, 2026, 5);
         st.cursor = 3;
         st.toggle_manual();
@@ -471,8 +469,7 @@ mod tests {
             shift: "afternoon".into(),
             processed: true,
             manual_override: false,
-            projects: None,
-        });
+            projects: None, ..Default::default() });
         let mut st = EditState::new(s, 2026, 5);
         st.cursor = 4; // 5 maja (index 4)
         st.begin_edit();
@@ -509,8 +506,7 @@ mod tests {
             shift: "regular".into(),
             processed: true,
             manual_override: false,
-            projects: None,
-        });
+            projects: None, ..Default::default() });
 
         st.apply_edits(fresh);
 
