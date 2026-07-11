@@ -290,7 +290,9 @@ pub fn load_all_overtime(config: &Config, debug: bool) -> TodayData {
 pub fn load_sessions_for_date(date: NaiveDate, config: &Config, debug: bool) -> Vec<Session> {
     use chrono_tz::Europe::Warsaw;
 
-    let files = find_all_jsonl_files(debug);
+    // Records for `date` can only live in files modified on/after that day;
+    // -1 day margin covers timezone skew around midnight.
+    let files = find_jsonl_files(None, Some(date - chrono::Duration::days(1)), debug);
 
     let mut all_records: Vec<TimestampRecord> = Vec::new();
 
