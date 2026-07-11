@@ -389,6 +389,14 @@ pub fn normalize_project_name(raw_name: &str, tracked_path: &str) -> String {
         } else {
             name.to_string()
         }
+    } else if !raw_name.starts_with("-home-") && raw_name != "unknown" && raw_name != "transcripts" {
+        // Already a short project name (e.g. archived by an older version) — keep it,
+        // merging Claude-worktree suffixes into the main project.
+        raw_name
+            .split_once("--claude-worktrees-")
+            .map(|(project, _)| project)
+            .unwrap_or(raw_name)
+            .to_string()
     } else {
         "Inne".to_string()
     }
