@@ -148,6 +148,7 @@ struct MonthDay {
     hours: f64,
     formatted: String,
     shift: String,
+    shift_overridden: bool,
     manual_override: bool,
     source: String,
     projects: Vec<MonthProject>,
@@ -222,6 +223,7 @@ async fn get_month(
                 hours,
                 formatted: archive::format_hm(hours),
                 shift: schedule::shift_str(config.effective_shift(date)).to_string(),
+                shift_overridden: config.shift_override(date).is_some(),
                 manual_override: stored.is_some_and(|day| day.manual_override),
                 source: if stored.is_some_and(|day| day.manual_override) {
                     "ręczne"
