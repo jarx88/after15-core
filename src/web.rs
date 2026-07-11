@@ -36,6 +36,7 @@ pub fn router() -> Router {
         .route("/api/day/{date}", get(get_day).put(put_day))
         .route("/api/day/{date}/override", delete(delete_override))
         .route("/api/day/{date}/lock", post(lock_day))
+        .route("/api/day/{date}/note", axum::routing::put(put_note))
         .route("/api/rebuild", post(rebuild))
         .route("/api/shift", axum::routing::put(put_shift))
         .route("/api/projects", get(get_projects))
@@ -150,6 +151,7 @@ struct MonthDay {
     shift: String,
     shift_overridden: bool,
     manual_override: bool,
+    has_note: bool,
     source: String,
     projects: Vec<MonthProject>,
 }
@@ -225,6 +227,7 @@ async fn get_month(
                 shift: schedule::shift_str(config.effective_shift(date)).to_string(),
                 shift_overridden: config.shift_override(date).is_some(),
                 manual_override: stored.is_some_and(|day| day.manual_override),
+                has_note: stored.is_some_and(|day| day.note.as_deref().is_some_and(|n| !n.is_empty())),
                 source: if stored.is_some_and(|day| day.manual_override) {
                     "ręczne"
                 } else if use_live {
@@ -285,6 +288,7 @@ struct DayResponse {
     manual_override: bool,
     stored_hours: Option<f64>,
     excluded_sessions: Vec<String>,
+    note: Option<String>,
 }
 
 #[derive(Default, Clone)]
@@ -435,6 +439,7 @@ fn day_response(date: NaiveDate, config: &config::Config) -> Result<Json<DayResp
         excluded_sessions: stored
             .map(|day| day.excluded_sessions.clone())
             .unwrap_or_default(),
+        note: stored.and_then(|day| day.note.clone()),
     }))
 }
 
@@ -503,6 +508,43 @@ async fn lock_day(
             );
         }
         summary.days.get_mut(&key).unwrap().manual_override = true;
+        Ok(())
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct NoteInput {
+    note: String,
+}
+
+async fn put_note(
+    State(state): State<AppState>,
+    Path(date): Path<String>,
+    Json(input): Json<NoteInput>,
+) -> Result<Json<DayResponse>, ApiError> {
+    let date = parse_date(&date)?;
+    if input.note.chars().count() > 2000 {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Notatka może mieć maksymalnie 2000 znaków".to_string(),
+        ));
+    }
+    let note = input.note.trim().to_string();
+    mutate_day(state, date, move |summary, config| {
+        let key = date.to_string();
+        if !summary.days.contains_key(&key) {
+            if note.is_empty() {
+                return Ok(());
+            }
+            let computed = compute_day(date, config);
+            summary.days.insert(
+                key.clone(),
+                archive::day_entry(date, computed.hours, Some(&computed.projects), false),
+            );
+        }
+        summary.days.get_mut(&key).unwrap().note =
+            if note.is_empty() { None } else { Some(note) };
         Ok(())
     })
     .await

@@ -33,10 +33,11 @@ pub fn rebuild_archive(config: &config::Config, debug: bool) -> Result<RebuildSt
         if summary.days.get(&key).is_some_and(|day| day.manual_override) {
             continue;
         }
-        summary.days.insert(
-            key,
-            archive::day_entry(*date, *hours, fresh.projects.get(date), false),
-        );
+        // Notes survive a rebuild even though the entry is rewritten.
+        let note = summary.days.get(&key).and_then(|day| day.note.clone());
+        let mut entry = archive::day_entry(*date, *hours, fresh.projects.get(date), false);
+        entry.note = note;
+        summary.days.insert(key, entry);
         updated += 1;
     }
 

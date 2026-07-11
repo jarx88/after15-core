@@ -35,6 +35,8 @@ pub struct DayEntry {
     pub projects: Option<BTreeMap<String, ProjectHoursEntry>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_sessions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 fn is_false(v: &bool) -> bool {
@@ -158,6 +160,7 @@ pub fn day_entry(
                 .collect()
         }),
         excluded_sessions: Vec::new(),
+        note: None,
     }
 }
 
