@@ -466,7 +466,7 @@ fn calculate_project_totals(
                     continue;
                 }
 
-                let entry = totals.entry(proj_name.clone()).or_default();
+                let entry = totals.entry(normalized).or_default();
                 entry.weekday_hours += hours.weekday_hours;
                 entry.weekend_hours += hours.weekend_hours;
             }

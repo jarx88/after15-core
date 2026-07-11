@@ -99,12 +99,28 @@ fn summary_projects(
         .days
         .iter()
         .filter_map(|(date, day)| {
+            let projects = day.projects.as_ref()?;
+            // Manual day total overrides the computed one — scale project hours
+            // proportionally so per-project sums (and PLN) match the correction.
+            let computed: f64 = projects
+                .values()
+                .map(|hours| hours.weekday_hours + hours.weekend_hours)
+                .sum();
+            let factor = if day.manual_override && computed > 0.0 {
+                day.hours / computed
+            } else {
+                1.0
+            };
             Some((
                 NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?,
-                day.projects
-                    .as_ref()?
+                projects
                     .iter()
-                    .map(|(name, hours)| (name.clone(), project_hours(hours)))
+                    .map(|(name, hours)| {
+                        let mut hours = project_hours(hours);
+                        hours.weekday_hours *= factor;
+                        hours.weekend_hours *= factor;
+                        (name.clone(), hours)
+                    })
                     .collect(),
             ))
         })
