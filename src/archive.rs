@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use crate::jsonl::ProjectHours;
 use crate::schedule::get_shift_type;
 
-fn round2(v: f64) -> f64 {
+pub fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
@@ -77,44 +77,85 @@ pub fn lock_archive() -> Option<File> {
     Some(file)
 }
 
+pub fn try_lock_archive() -> Option<File> {
+    let lock_path = get_summary_path()?.with_extension("json.lock");
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(lock_path)
+        .ok()?;
+    file.try_lock_exclusive().ok()?;
+    Some(file)
+}
+
 pub fn load_summary() -> DailySummaryFile {
+    load_summary_checked().unwrap_or_else(|e| {
+        eprintln!("[BŁĄD] {}", e);
+        std::process::exit(1);
+    })
+}
+
+pub fn load_summary_checked() -> Result<DailySummaryFile, String> {
     let Some(path) = get_summary_path() else {
-        return DailySummaryFile::default();
+        return Ok(DailySummaryFile::default());
     };
 
     if !path.exists() {
-        return DailySummaryFile {
+        return Ok(DailySummaryFile {
             version: 2,
             days: BTreeMap::new(),
             months: BTreeMap::new(),
-        };
+        });
     }
 
-    let content = fs::read_to_string(&path).unwrap_or_else(|e| {
-        eprintln!(
-            "[BŁĄD] Nie można odczytać daily_summary.json ({}): {}",
-            path.display(),
-            e
-        );
-        std::process::exit(1);
-    });
+    let content = fs::read_to_string(&path).map_err(|e| {
+        format!("Nie można odczytać daily_summary.json ({}): {}", path.display(), e)
+    })?;
 
     if content.trim().is_empty() {
-        return DailySummaryFile {
+        return Ok(DailySummaryFile {
             version: 2,
             days: BTreeMap::new(),
             months: BTreeMap::new(),
-        };
+        });
     }
 
-    serde_json::from_str(&content).unwrap_or_else(|e| {
-        eprintln!(
-            "[BŁĄD] Nie można sparsować daily_summary.json ({}): {}",
-            path.display(),
-            e
-        );
-        std::process::exit(1);
+    serde_json::from_str(&content).map_err(|e| {
+        format!("Nie można sparsować daily_summary.json ({}): {}", path.display(), e)
     })
+}
+
+pub fn day_entry(
+    date: NaiveDate,
+    hours: f64,
+    projects: Option<&HashMap<String, ProjectHours>>,
+    manual_override: bool,
+) -> DayEntry {
+    DayEntry {
+        hours: round2(hours),
+        formatted: format_hm(hours),
+        shift: crate::schedule::shift_str(get_shift_type(date)).to_string(),
+        processed: true,
+        manual_override,
+        projects: projects.map(|projects| {
+            projects
+                .iter()
+                .map(|(name, hours)| {
+                    (
+                        name.clone(),
+                        ProjectHoursEntry {
+                            weekday_hours: round2(hours.weekday_hours),
+                            weekend_hours: round2(hours.weekend_hours),
+                            regular_hours: round2(hours.regular_hours),
+                        },
+                    )
+                })
+                .collect()
+        }),
+    }
 }
 
 pub fn force_backup() -> Result<PathBuf, String> {

@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0e1013;color:#e6e8eb;font-family:'IBM Plex Sans',sans-serif}
+*{box-sizing:border-box}
+a{color:#e8b04b;text-decoration:none}
+a:hover{color:#f0c374}
+input{font-family:'IBM Plex Mono',monospace}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:#23272e;border:2px solid #0e1013;border-radius:5px}
+</style>
+</helmet>
+<div style="display:flex;flex-direction:column;height:100vh;overflow:hidden" data-screen-label="After15">
+
+  <!-- TOPBAR -->
+  <div style="display:flex;align-items:center;gap:24px;height:44px;padding:0 16px;border-bottom:1px solid #23272e;background:#0e1013;flex:none">
+    <div style="display:flex;align-items:baseline;gap:8px">
+      <span style="font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:14px;letter-spacing:.06em;color:{{accent}}">AFTER15</span>
+      <span style="font-size:11px;color:#565d68">kalkulator nadgodzin</span>
+    </div>
+    <div style="display:flex;gap:2px">
+      <button onClick="{{tabKal}}" style="border:none;cursor:pointer;padding:5px 12px;font-size:12.5px;font-weight:500;background:{{tabKalBg}};color:{{tabKalFg}};border-radius:2px;font-family:'IBM Plex Sans',sans-serif">Kalendarz</button>
+      <button onClick="{{tabRap}}" style="border:none;cursor:pointer;padding:5px 12px;font-size:12.5px;font-weight:500;background:{{tabRapBg}};color:{{tabRapFg}};border-radius:2px;font-family:'IBM Plex Sans',sans-serif">Raport</button>
+      <button onClick="{{tabProj}}" style="border:none;cursor:pointer;padding:5px 12px;font-size:12.5px;font-weight:500;background:{{tabProjBg}};color:{{tabProjFg}};border-radius:2px;font-family:'IBM Plex Sans',sans-serif">Projekty</button>
+    </div>
+    <div style="flex:1"></div>
+    <div style="display:flex;align-items:center;gap:12px">
+      <span style="font-size:11px;color:#565d68;font-family:'IBM Plex Mono',monospace">dane: {{freshText}}</span>
+      <button onClick="{{doRebuild}}" style="display:flex;align-items:center;gap:6px;cursor:pointer;background:none;border:1px solid #23272e;color:#8a919c;padding:5px 10px;font-size:12px;border-radius:2px;font-family:'IBM Plex Sans',sans-serif" style-hover="border-color:#3a414c;color:#e6e8eb">↻ Przelicz z JSONL</button>
+    </div>
+  </div>
+
+  <!-- TOAST -->
+  <sc-if value="{{hasToast}}" hint-placeholder-val="{{false}}">
+    <div style="position:fixed;bottom:20px;right:20px;z-index:50;background:#131519;border:1px solid #3a414c;border-left:2px solid {{accent}};padding:10px 14px;font-size:12.5px;color:#e6e8eb;font-family:'IBM Plex Mono',monospace">{{toast}}</div>
+  </sc-if>
+
+  <!-- ================= KALENDARZ ================= -->
+  <sc-if value="{{isKal}}" hint-placeholder-val="{{true}}">
+  <div style="display:flex;flex:1;min-height:0">
+    <div style="flex:1;display:flex;flex-direction:column;min-width:0;padding:16px 20px;overflow-y:auto" data-screen-label="Kalendarz">
+
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:14px">
+        <div style="display:flex;align-items:center;gap:4px">
+          <button onClick="{{prevMonth}}" style="cursor:pointer;background:none;border:1px solid #23272e;color:#8a919c;width:26px;height:26px;font-size:13px;border-radius:2px" style-hover="color:#e6e8eb;border-color:#3a414c">‹</button>
+          <span style="font-size:16px;font-weight:600;min-width:170px;text-align:center">{{monthLabel}}</span>
+          <button onClick="{{nextMonth}}" style="cursor:pointer;background:none;border:1px solid #23272e;color:#8a919c;width:26px;height:26px;font-size:13px;border-radius:2px" style-hover="color:#e6e8eb;border-color:#3a414c">›</button>
+        </div>
+        <span style="font-size:11px;color:#565d68">←/→ miesiąc · Enter otwiera dziś · Esc zamyka</span>
+        <div style="flex:1"></div>
+        <div style="display:flex;align-items:baseline;gap:8px">
+          <span style="font-size:11.5px;color:#8a919c;text-transform:uppercase;letter-spacing:.08em">Suma miesiąca</span>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:20px;font-weight:600;color:{{accent}}">{{monthTotal}}</span>
+          <span style="font-size:11.5px;color:#565d68;font-family:'IBM Plex Mono',monospace">{{daysWithOt}} dni</span>
+        </div>
+      </div>
+
+      <!-- wariant: siatka -->
+      <sc-if value="{{isGrid}}" hint-placeholder-val="{{true}}">
+        <div style="display:grid;grid-template-columns:repeat(7,1fr);border-left:1px solid #23272e;border-top:1px solid #23272e">
+          <sc-for list="{{dows}}" as="d" hint-placeholder-count="7">
+            <div style="padding:5px 8px;font-size:10.5px;color:#565d68;text-transform:uppercase;letter-spacing:.1em;border-right:1px solid #23272e;border-bottom:1px solid #23272e;background:#101216">{{d}}</div>
+          </sc-for>
+          <sc-for list="{{cells}}" as="c" hint-placeholder-count="35">
+            <div onClick="{{c.onClick}}" style="position:relative;min-height:86px;padding:6px 8px;border-right:1px solid #23272e;border-bottom:1px solid #23272e;cursor:{{c.cursor}};background:{{c.bg}};box-shadow:{{c.shadow}}" style-hover="background:#171a1f">
+              <div style="display:flex;align-items:center;gap:6px">
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:{{c.numColor}}">{{c.day}}</span>
+                <span style="width:7px;height:7px;border-radius:1px;background:{{c.shiftColor}};display:{{c.dotDisp}}" title="{{c.shiftName}}"></span>
+                <sc-if value="{{c.isOverride}}" hint-placeholder-val="{{false}}">
+                  <span style="font-size:9px;font-family:'IBM Plex Mono',monospace;color:#0e1013;background:{{accent}};padding:0 4px;border-radius:1px;font-weight:600">RĘCZNE</span>
+                </sc-if>
+              </div>
+              <sc-if value="{{c.hasHours}}" hint-placeholder-val="{{false}}">
+                <div style="position:absolute;right:8px;bottom:6px;font-family:'IBM Plex Mono',monospace;font-size:15px;font-weight:600;color:{{accent}}">{{c.hours}}</div>
+              </sc-if>
+            </div>
+          </sc-for>
+        </div>
+      </sc-if>
+
+      <!-- wariant: lista -->
+      <sc-if value="{{isList}}" hint-placeholder-val="{{false}}">
+        <div style="border:1px solid #23272e">
+          <div style="display:grid;grid-template-columns:120px 110px 1fr 90px 80px;padding:6px 12px;border-bottom:1px solid #23272e;background:#101216;font-size:10.5px;color:#565d68;text-transform:uppercase;letter-spacing:.1em">
+            <span>Data</span><span>Zmiana</span><span>Projekty</span><span>Źródło</span><span style="text-align:right">Nadgodz.</span>
+          </div>
+          <sc-for list="{{listRows}}" as="r" hint-placeholder-count="10">
+            <div onClick="{{r.onClick}}" style="display:grid;grid-template-columns:120px 110px 1fr 90px 80px;align-items:center;padding:7px 12px;border-bottom:1px solid #1a1d22;cursor:pointer;background:{{r.bg}}" style-hover="background:#171a1f">
+              <span style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#e6e8eb">{{r.date}}</span>
+              <span style="display:flex;align-items:center;gap:6px;font-size:11.5px;color:#8a919c"><span style="width:7px;height:7px;border-radius:1px;background:{{r.shiftColor}}"></span>{{r.shift}}</span>
+              <span style="font-size:11.5px;color:#8a919c;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:12px">{{r.projects}}</span>
+              <span style="font-size:10.5px;font-family:'IBM Plex Mono',monospace;color:{{r.srcColor}}">{{r.src}}</span>
+              <span style="text-align:right;font-family:'IBM Plex Mono',monospace;font-size:13.5px;font-weight:600;color:{{accent}}">{{r.hours}}</span>
+            </div>
+          </sc-for>
+        </div>
+      </sc-if>
+
+      <!-- legenda -->
+      <div style="display:flex;gap:18px;margin-top:12px;flex-wrap:wrap">
+        <sc-for list="{{legend}}" as="l" hint-placeholder-count="4">
+          <span style="display:flex;align-items:center;gap:6px;font-size:11.5px;color:#8a919c"><span style="width:8px;height:8px;border-radius:1px;background:{{l.color}}"></span>{{l.name}} <span style="color:#565d68;font-family:'IBM Plex Mono',monospace">{{l.window}}</span></span>
+        </sc-for>
+      </div>
+    </div>
+
+    <!-- ============ DRAWER DNIA ============ -->
+    <sc-if value="{{drawerOpen}}" hint-placeholder-val="{{false}}">
+      <div style="width:460px;flex:none;border-left:1px solid #23272e;background:#101216;overflow-y:auto;display:flex;flex-direction:column" data-screen-label="Widok dnia">
+        <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #23272e;position:sticky;top:0;background:#101216;z-index:2">
+          <div>
+            <div style="font-size:14px;font-weight:600">{{d.dateLabel}}</div>
+            <div style="display:flex;align-items:center;gap:6px;margin-top:2px;font-size:11.5px;color:#8a919c">
+              <span style="width:7px;height:7px;border-radius:1px;background:{{d.shiftColor}}"></span>{{d.shiftName}}
+              <span style="font-family:'IBM Plex Mono',monospace;color:#565d68">{{d.windowLabel}}</span>
+            </div>
+          </div>
+          <div style="flex:1"></div>
+          <sc-if value="{{d.override}}" hint-placeholder-val="{{false}}">
+            <span style="font-size:9.5px;font-family:'IBM Plex Mono',monospace;color:#0e1013;background:{{accent}};padding:2px 6px;border-radius:1px;font-weight:600">RĘCZNE</span>
+          </sc-if>
+          <button onClick="{{closeDrawer}}" style="cursor:pointer;background:none;border:1px solid #23272e;color:#8a919c;width:24px;height:24px;font-size:12px;border-radius:2px" style-hover="color:#e6e8eb">✕</button>
+        </div>
+
+        <!-- TIMELINE -->
+        <div style="padding:16px 16px 8px">
+          <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+            <span style="font-size:10.5px;color:#565d68;text-transform:uppercase;letter-spacing:.1em">Sesje vs okno pracy</span>
+            <span style="font-size:10.5px;color:#565d68;font-family:'IBM Plex Mono',monospace">{{d.axisLabel}}</span>
+          </div>
+          <div style="position:relative;border:1px solid #23272e;background:#0e1013;padding:8px 0 20px">
+            <sc-if value="{{d.hasWindow}}" hint-placeholder-val="{{true}}">
+              <div style="position:absolute;top:0;bottom:0;left:{{d.bandL}}%;width:{{d.bandW}}%;background:rgba(255,255,255,0.035);border-left:1px dashed #3a414c;border-right:1px dashed #3a414c">
+                <span style="position:absolute;top:2px;left:4px;font-size:9px;color:#565d68;font-family:'IBM Plex Mono',monospace;white-space:nowrap">okno pracy</span>
+              </div>
+            </sc-if>
+            <sc-for list="{{d.ticks}}" as="t" hint-placeholder-count="6">
+              <div style="position:absolute;top:0;bottom:14px;left:{{t.l}}%;width:1px;background:#1a1d22"></div>
+              <span style="position:absolute;bottom:2px;left:{{t.l}}%;transform:translateX(-50%);font-size:9px;color:#565d68;font-family:'IBM Plex Mono',monospace">{{t.label}}</span>
+            </sc-for>
+            <div style="position:relative;margin-top:12px">
+              <sc-for list="{{d.lanes}}" as="lane" hint-placeholder-count="2">
+                <div style="position:relative;height:20px;margin:5px 0">
+                  <sc-for list="{{lane.segs}}" as="s" hint-placeholder-count="2">
+                    <div style="position:absolute;top:3px;height:14px;left:{{s.l}}%;width:{{s.w}}%;background:{{s.c}};border:1px solid {{s.b}}" title="{{s.tip}}"></div>
+                  </sc-for>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+          <div style="display:flex;gap:14px;margin-top:6px">
+            <span style="display:flex;align-items:center;gap:5px;font-size:10.5px;color:#8a919c"><span style="width:10px;height:8px;background:#2b313a;border:1px solid #3a414c"></span>w oknie pracy</span>
+            <span style="display:flex;align-items:center;gap:5px;font-size:10.5px;color:#8a919c"><span style="width:10px;height:8px;background:{{accent}}"></span>nadgodziny</span>
+          </div>
+        </div>
+
+        <!-- SESJE -->
+        <div style="padding:8px 16px">
+          <div style="font-size:10.5px;color:#565d68;text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px">Sesje · {{d.sessionCount}}</div>
+          <sc-if value="{{d.noSessions}}" hint-placeholder-val="{{false}}">
+            <div style="font-size:12px;color:#565d68;padding:10px 0">Brak wykrytych sesji w tym dniu.</div>
+          </sc-if>
+          <sc-for list="{{d.sessions}}" as="s" hint-placeholder-count="2">
+            <div style="border:1px solid #23272e;margin-bottom:8px;background:#0e1013">
+              <div style="display:flex;align-items:center;gap:10px;padding:7px 10px;border-bottom:1px solid #1a1d22">
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#e6e8eb">{{s.time}}</span>
+                <span style="font-size:11px;color:#565d68;font-family:'IBM Plex Mono',monospace">{{s.dur}}</span>
+                <div style="flex:1"></div>
+                <span style="font-size:11px;color:#8a919c">nadgodziny:</span>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;font-weight:600;color:{{s.otColor}}">{{s.ot}}</span>
+              </div>
+              <div style="padding:6px 10px;display:flex;flex-direction:column;gap:3px">
+                <sc-for list="{{s.projects}}" as="p" hint-placeholder-count="1">
+                  <div style="display:flex;align-items:center;gap:8px;font-size:11.5px">
+                    <span style="color:#e6e8eb">{{p.name}}</span>
+                    <span style="color:#565d68;font-family:'IBM Plex Mono',monospace">{{p.pct}}%</span>
+                    <div style="flex:1"></div>
+                    <span style="color:#8a919c;font-family:'IBM Plex Mono',monospace">{{p.hours}}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+
+        <!-- SUMA + EDYCJA -->
+        <div style="margin-top:auto;padding:14px 16px;border-top:1px solid #23272e;background:#0e1013">
+          <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:10px">
+            <span style="font-size:11.5px;color:#8a919c;text-transform:uppercase;letter-spacing:.08em">Suma dnia</span>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:22px;font-weight:600;color:{{accent}}">{{d.totalStr}}</span>
+            <sc-if value="{{d.override}}" hint-placeholder-val="{{false}}">
+              <span style="font-size:11px;color:#565d68;font-family:'IBM Plex Mono',monospace">wyliczone: {{d.computedStr}}</span>
+            </sc-if>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <input value="{{editVal}}" onChange="{{onEditChange}}" placeholder="H:MM" style="width:80px;background:#131519;border:1px solid #23272e;color:#e6e8eb;padding:6px 8px;font-size:13px;border-radius:2px;outline:none" style-focus="border-color:{{accent}}">
+            <button onClick="{{saveEdit}}" style="cursor:pointer;background:{{accent}};border:none;color:#0e1013;padding:7px 12px;font-size:12px;font-weight:600;border-radius:2px;font-family:'IBM Plex Sans',sans-serif">Zapisz ręcznie</button>
+            <sc-if value="{{d.override}}" hint-placeholder-val="{{false}}">
+              <button onClick="{{clearOverride}}" style="cursor:pointer;background:none;border:1px solid #23272e;color:#8a919c;padding:6px 12px;font-size:12px;border-radius:2px;font-family:'IBM Plex Sans',sans-serif" style-hover="color:#e6e8eb;border-color:#3a414c">Przywróć wyliczone</button>
+            </sc-if>
+            <sc-if value="{{d.canLock}}" hint-placeholder-val="{{false}}">
+              <button onClick="{{lockComputed}}" title="Ustawia flagę manual_override bez zmiany godzin — rebuild nie nadpisze tej wartości" style="cursor:pointer;background:none;border:1px solid #23272e;color:#8a919c;padding:6px 12px;font-size:12px;border-radius:2px;font-family:'IBM Plex Sans',sans-serif" style-hover="color:#e6e8eb;border-color:#3a414c">Zablokuj wyliczone</button>
+            </sc-if>
+          </div>
+          <div style="font-size:10.5px;color:#565d68;margin-top:8px">Ręczna korekta ustawia manual_override — rebuild z JSONL nie nadpisze tej wartości.</div>
+        </div>
+      </div>
+    </sc-if>
+  </div>
+  </sc-if>
+
+  <!-- ================= RAPORT ================= -->
+  <sc-if value="{{isRap}}" hint-placeholder-val="{{false}}">
+  <div style="flex:1;overflow-y:auto;padding:16px 20px" data-screen-label="Raport miesięczny">
+    <div style="display:flex;align-items:center;gap:16px;margin-bottom:14px;max-width:980px">
+      <div style="display:flex;align-items:center;gap:4px">
+        <button onClick="{{prevMonth}}" style="cursor:pointer;background:none;border:1px solid #23272e;color:#8a919c;width:26px;height:26px;font-size:13px;border-radius:2px" style-hover="color:#e6e8eb">‹</button>
+        <span style="font-size:16px;font-weight:600;min-width:170px;text-align:center">{{monthLabel}}</span>
+        <button onClick="{{nextMonth}}" style="cursor:pointer;background:none;border:1px solid #23272e;color:#8a919c;width:26px;height:26px;font-size:13px;border-radius:2px" style-hover="color:#e6e8eb">›</button>
+      </div>
+      <div style="flex:1"></div>
+      <button onClick="{{exportPdf}}" style="cursor:pointer;background:{{accent}};border:none;color:#0e1013;padding:7px 14px;font-size:12px;font-weight:600;border-radius:2px;font-family:'IBM Plex Sans',sans-serif">Eksport PDF</button>
+      <button onClick="{{exportCsv}}" style="cursor:pointer;background:none;border:1px solid #23272e;color:#8a919c;padding:6px 14px;font-size:12px;border-radius:2px;font-family:'IBM Plex Sans',sans-serif" style-hover="color:#e6e8eb;border-color:#3a414c">CSV</button>
+    </div>
+
+    <div style="display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap">
+      <div style="flex:1;min-width:520px;border:1px solid #23272e">
+        <div style="display:grid;grid-template-columns:110px 130px 1fr 90px 80px;padding:6px 12px;border-bottom:1px solid #23272e;background:#101216;font-size:10.5px;color:#565d68;text-transform:uppercase;letter-spacing:.1em">
+          <span>Data</span><span>Zmiana</span><span>Projekty</span><span>Źródło</span><span style="text-align:right">Nadgodz.</span>
+        </div>
+        <sc-for list="{{repRows}}" as="r" hint-placeholder-count="12">
+          <div onClick="{{r.onClick}}" style="display:grid;grid-template-columns:110px 130px 1fr 90px 80px;align-items:center;padding:6px 12px;border-bottom:1px solid #1a1d22;cursor:pointer" style-hover="background:#171a1f">
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:12px">{{r.date}}</span>
+            <span style="display:flex;align-items:center;gap:6px;font-size:11.5px;color:#8a919c"><span style="width:7px;height:7px;border-radius:1px;background:{{r.shiftColor}}"></span>{{r.shift}}</span>
+            <span style="font-size:11.5px;color:#8a919c;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:10px">{{r.projects}}</span>
+            <span style="font-size:10.5px;font-family:'IBM Plex Mono',monospace;color:{{r.srcColor}}">{{r.src}}</span>
+            <span style="text-align:right;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;color:{{accent}}">{{r.hours}}</span>
+          </div>
+        </sc-for>
+        <div style="display:flex;justify-content:space-between;padding:8px 12px;background:#101216">
+          <span style="font-size:11.5px;color:#8a919c;text-transform:uppercase;letter-spacing:.08em">Suma miesiąca</span>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:15px;font-weight:600;color:{{accent}}">{{monthTotal}}</span>
+        </div>
+      </div>
+
+      <div style="width:380px;flex:none;border:1px solid #23272e">
+        <div style="padding:8px 12px;border-bottom:1px solid #23272e;background:#101216;font-size:10.5px;color:#565d68;text-transform:uppercase;letter-spacing:.1em">Podział per projekt</div>
+        <div style="display:grid;grid-template-columns:1fr 56px 56px 56px 72px;padding:5px 12px;border-bottom:1px solid #1a1d22;font-size:10px;color:#565d68;text-transform:uppercase;letter-spacing:.08em">
+          <span>Projekt</span><span style="text-align:right">Dzień</span><span style="text-align:right">Wknd</span><span style="text-align:right">Suma</span><span style="text-align:right">PLN</span>
+        </div>
+        <sc-for list="{{repProjects}}" as="p" hint-placeholder-count="4">
+          <div style="display:grid;grid-template-columns:1fr 56px 56px 56px 72px;padding:6px 12px;border-bottom:1px solid #1a1d22;font-size:12px;align-items:center">
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:8px">{{p.name}}</span>
+            <span style="text-align:right;font-family:'IBM Plex Mono',monospace;color:#8a919c">{{p.wd}}</span>
+            <span style="text-align:right;font-family:'IBM Plex Mono',monospace;color:#8a919c">{{p.we}}</span>
+            <span style="text-align:right;font-family:'IBM Plex Mono',monospace;font-weight:600">{{p.sum}}</span>
+            <span style="text-align:right;font-family:'IBM Plex Mono',monospace;color:#8a919c">{{p.pln}}</span>
+          </div>
+        </sc-for>
+        <sc-if value="{{showPln}}" hint-placeholder-val="{{true}}">
+          <div style="padding:8px 12px;background:#101216;border-top:1px solid #23272e">
+            <div style="display:flex;justify-content:space-between">
+              <span style="font-size:11.5px;color:#e6e8eb">Wynagrodzenie netto</span>
+              <span style="font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;color:{{accent}}">{{plnTotal}}</span>
+            </div>
+            <div style="font-size:10px;color:#565d68;margin-top:4px;font-family:'IBM Plex Mono',monospace">{{plnRates}}</div>
+          </div>
+        </sc-if>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+  <!-- ================= PROJEKTY ================= -->
+  <sc-if value="{{isProj}}" hint-placeholder-val="{{false}}">
+  <div style="flex:1;overflow-y:auto;padding:16px 20px" data-screen-label="Suma per projekt">
+    <div style="display:flex;align-items:center;gap:16px;margin-bottom:14px;max-width:760px">
+      <span style="font-size:16px;font-weight:600">Projekty — od początku monitorowania</span>
+      <div style="flex:1"></div>
+      <div style="display:flex;border:1px solid #23272e;border-radius:2px;overflow:hidden">
+        <button onClick="{{modeOt}}" style="cursor:pointer;border:none;padding:5px 12px;font-size:12px;background:{{modeOtBg}};color:{{modeOtFg}};font-family:'IBM Plex Sans',sans-serif">Tylko nadgodziny</button>
+        <button onClick="{{modeAll}}" style="cursor:pointer;border:none;padding:5px 12px;font-size:12px;background:{{modeAllBg}};color:{{modeAllFg}};border-left:1px solid #23272e;font-family:'IBM Plex Sans',sans-serif">Wszystkie godziny</button>
+      </div>
+    </div>
+    <div style="max-width:760px;border:1px solid #23272e">
+      <div style="display:grid;grid-template-columns:30px 160px 1fr 90px 70px;padding:6px 12px;border-bottom:1px solid #23272e;background:#101216;font-size:10.5px;color:#565d68;text-transform:uppercase;letter-spacing:.1em">
+        <span>#</span><span>Projekt</span><span></span><span style="text-align:right">Godziny</span><span style="text-align:right">Udział</span>
+      </div>
+      <sc-for list="{{projRows}}" as="p" hint-placeholder-count="4">
+        <div style="display:grid;grid-template-columns:30px 160px 1fr 90px 70px;align-items:center;padding:8px 12px;border-bottom:1px solid #1a1d22">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#565d68">{{p.rank}}</span>
+          <span style="font-size:12.5px">{{p.name}}</span>
+          <div style="height:8px;background:#1a1d22;border-radius:1px;overflow:hidden;margin-right:16px"><div style="height:100%;width:{{p.barW}}%;background:{{accent}}"></div></div>
+          <span style="text-align:right;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600">{{p.hours}}</span>
+          <span style="text-align:right;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#8a919c">{{p.pct}}%</span>
+        </div>
+      </sc-for>
+      <div style="display:flex;justify-content:space-between;padding:8px 12px;background:#101216">
+        <span style="font-size:11.5px;color:#8a919c;text-transform:uppercase;letter-spacing:.08em">{{projTotalLabel}}</span>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:15px;font-weight:600;color:{{accent}}">{{projTotal}}</span>
+      </div>
+    </div>
+    <div style="font-size:11px;color:#565d68;margin-top:10px">Godziny sesji przypisywane do projektów proporcjonalnie do ścieżek plików. Od 2025-07-28.</div>
+  </div>
+  </sc-if>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{
+  &quot;wariantKalendarza&quot;: {&quot;editor&quot;: &quot;enum&quot;, &quot;default&quot;: &quot;siatka&quot;, &quot;options&quot;: [&quot;siatka&quot;, &quot;lista&quot;], &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Warianty&quot;},
+  &quot;akcent&quot;: {&quot;editor&quot;: &quot;color&quot;, &quot;default&quot;: &quot;#e8b04b&quot;, &quot;options&quot;: [&quot;#e8b04b&quot;, &quot;#4cc38a&quot;, &quot;#4cb8c4&quot;], &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Warianty&quot;},
+  &quot;pokazujPLN&quot;: {&quot;editor&quot;: &quot;boolean&quot;, &quot;default&quot;: true, &quot;tsType&quot;: &quot;boolean&quot;, &quot;section&quot;: &quot;Raport&quot;}
+}">
+class Component extends DCLogic {
+  state = {
+    y: 2026, m: 7, tab: 'kal', sel: null, editVal: '',
+    overrides: { '2026-07-02': 3.0, '2026-06-18': 1.5 },
+    projMode: 'ot', toast: '', rebuildAt: Date.now() - 12 * 60000
+  };
+
+  // ---------- deterministic mock data ----------
+  hash(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+  rng(seed) { let a = seed; return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+  shiftType(dt) {
+    const dow = (dt.getDay() + 6) % 7; // 0=Mon
+    // dwa anchory cyklu (jak w schedule.rs): stary 2025-07-28, nowy 2026-04-20 (valid_from 2026-04-06)
+    const start = (dt >= new Date(2026, 3, 6)) ? new Date(2026, 3, 20) : new Date(2025, 6, 28);
+    const days = Math.round((dt - start) / 86400000);
+    let inAft = false;
+    if (days >= 0) { const off = days % 21; inAft = off >= 0 && off <= 5; }
+    if (dow === 6) return 'weekend';
+    if (dow === 5) return inAft ? 'saturday_afternoon' : 'weekend';
+    return inAft ? 'afternoon' : 'regular';
+  }
+  windowFor(st) {
+    if (st === 'regular') return [6, 15];
+    if (st === 'afternoon') return [15, 21];
+    if (st === 'saturday_afternoon') return [8, 14];
+    return null;
+  }
+  shiftMeta(st) {
+    const M = {
+      regular: { name: 'Regularna', color: '#5286c9', win: '6:00–15:00' },
+      afternoon: { name: 'Popołudniowa', color: '#9a7fd1', win: '15:00–21:00' },
+      saturday_afternoon: { name: 'Sobota pop.', color: '#3fa08c', win: '8:00–14:00' },
+      weekend: { name: 'Weekend', color: '#cf5f5f', win: 'cały dzień' }
+    };
+    return M[st];
+  }
+  fmtHM(h) { const tm = Math.round(h * 60); return Math.floor(tm / 60) + ':' + String(tm % 60).padStart(2, '0'); }
+  fmtClock(h) { const tm = Math.round(h * 60); return Math.floor(tm / 60) + ':' + String(tm % 60).padStart(2, '0'); }
+  key(dt) { return dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0') + '-' + String(dt.getDate()).padStart(2, '0'); }
+  parseHM(s) {
+    // jak parse_hours w tui/state.rs: "H:MM" lub ułamek dziesiętny, zakres 0-24, minuty 0-59
+    const t = (s || '').trim();
+    if (!t) return null;
+    let v;
+    const m = /^(\d{1,2}):(\d{1,2})$/.exec(t);
+    if (m) { const mm = +m[2]; if (mm > 59) return null; v = (+m[1]) + mm / 60; }
+    else { v = parseFloat(t); if (!/^\d+(\.\d+)?$/.test(t) || isNaN(v)) return null; }
+    if (v < 0 || v > 24) return null;
+    return Math.round(v * 100) / 100;
+  }
+
+  today() { return new Date(2026, 6, 11); }
+
+  sessionsFor(dt) {
+    const k = this.key(dt);
+    if (dt > this.today()) return [];
+    const st = this.shiftType(dt);
+    const r = this.rng(this.hash(k));
+    const PR = ['farmaster2', 'after15-core', 'side-project', 'infra-tools'];
+    const pick = () => {
+      const n = r() < 0.35 ? 2 : 1; const idx = Math.floor(r() * 4);
+      if (n === 1) return [{ name: PR[idx], share: 1 }];
+      const j = (idx + 1 + Math.floor(r() * 3)) % 4; const s = 0.55 + r() * 0.3;
+      return [{ name: PR[idx], share: s }, { name: PR[j], share: 1 - s }];
+    };
+    const S = [];
+    const add = (st_, dur) => { const a = Math.round(st_ * 60) / 60, b = Math.round((st_ + dur) * 60) / 60; if (dur >= 5 / 60) S.push({ s: a, e: Math.min(b, 23.9), projects: pick() }); };
+    if (st === 'weekend') {
+      if (r() < 0.5) add(9 + r() * 3, 1 + r() * 2.5);
+      if (r() < 0.3) add(16 + r() * 3, 0.5 + r() * 2);
+    } else if (st === 'regular') {
+      add(6.5 + r() * 2, 2 + r() * 3);
+      if (r() < 0.65) add(15.1 + r() * 1.2, 0.7 + r() * 2.6);
+      if (r() < 0.18) add(4.7 + r() * 0.8, 0.5 + r() * 0.8);
+    } else if (st === 'afternoon') {
+      if (r() < 0.55) add(10 + r() * 2.5, 0.7 + r() * 2);
+      add(15.3 + r() * 1.5, 2 + r() * 3);
+      if (r() < 0.3) add(21.1 + r() * 0.4, 0.4 + r() * 1.2);
+    } else {
+      add(8.5 + r() * 2, 1.5 + r() * 2.5);
+      if (r() < 0.5) add(14.2 + r() * 1.5, 0.5 + r() * 2);
+    }
+    S.sort((a, b) => a.s - b.s);
+    return S;
+  }
+  overtimeOf(sess, win) {
+    if (!win) return sess.e - sess.s;
+    let ot = 0;
+    if (sess.s < win[0]) ot += Math.min(sess.e, win[0]) - sess.s;
+    if (sess.e > win[1]) ot += sess.e - Math.max(sess.s, win[1]);
+    return Math.max(0, ot);
+  }
+  dayData(dt) {
+    const st = this.shiftType(dt);
+    const win = this.windowFor(st);
+    const sessions = this.sessionsFor(dt);
+    let computed = 0;
+    for (const s of sessions) computed += this.overtimeOf(s, win);
+    const k = this.key(dt);
+    const ov = this.state.overrides[k];
+    return { k, st, win, sessions, computed, override: ov != null, hours: ov != null ? ov : computed };
+  }
+
+  monthDates(y, m) {
+    const n = new Date(y, m, 0).getDate();
+    const out = [];
+    for (let d = 1; d <= n; d++) out.push(new Date(y, m - 1, d));
+    return out;
+  }
+
+  // ---------- lifecycle ----------
+  componentDidMount() {
+    this._kd = (e) => {
+      if (e.target.tagName === 'INPUT') return;
+      if (e.key === 'ArrowLeft') this.nav(-1);
+      else if (e.key === 'ArrowRight') this.nav(1);
+      else if (e.key === 'Enter' && this.state.tab === 'kal') {
+        const t = this.today();
+        if (t.getFullYear() === this.state.y && t.getMonth() + 1 === this.state.m) this.openDay(this.key(t));
+      }
+      else if (e.key === 'Escape') this.setState({ sel: null });
+    };
+    window.addEventListener('keydown', this._kd);
+  }
+  componentWillUnmount() { window.removeEventListener('keydown', this._kd); }
+  nav(d) { let { y, m } = this.state; m += d; if (m < 1) { m = 12; y--; } if (m > 12) { m = 1; y++; } this.setState({ y, m, sel: null }); }
+  openDay(k) {
+    const dt = new Date(k + 'T12:00');
+    const dd = this.dayData(dt);
+    this.setState({ sel: k, editVal: this.fmtHM(dd.hours) });
+  }
+  showToast(t) { this.setState({ toast: t }); clearTimeout(this._tt); this._tt = setTimeout(() => this.setState({ toast: '' }), 3000); }
+
+  // ---------- render ----------
+  renderVals() {
+    const S = this.state;
+    const accent = this.props.akcent ?? '#e8b04b';
+    const showPln = this.props.pokazujPLN ?? true;
+    const variant = this.props.wariantKalendarza ?? 'siatka';
+    const MONTHS = ['styczeń', 'luty', 'marzec', 'kwiecień', 'maj', 'czerwiec', 'lipiec', 'sierpień', 'wrzesień', 'październik', 'listopad', 'grudzień'];
+    const DOWS_FULL = ['poniedziałek', 'wtorek', 'środa', 'czwartek', 'piątek', 'sobota', 'niedziela'];
+    const todayKey = this.key(this.today());
+
+    const dates = this.monthDates(S.y, S.m);
+    const daysData = dates.map(dt => ({ dt, ...this.dayData(dt) }));
+    const monthTotal = daysData.reduce((a, d) => a + d.hours, 0);
+    const daysWithOt = daysData.filter(d => d.hours > 0.008).length;
+
+    // calendar cells
+    const first = new Date(S.y, S.m - 1, 1);
+    const lead = (first.getDay() + 6) % 7;
+    const cells = [];
+    for (let i = 0; i < lead; i++) cells.push({ key: 'e' + i, day: '', empty: true, cursor: 'default', bg: '#0c0e11', dotDisp: 'none', numColor: '#565d68', hasHours: false, isOverride: false, shadow: 'none', onClick: null });
+    for (const d of daysData) {
+      const meta = this.shiftMeta(d.st);
+      const isToday = d.k === todayKey;
+      const isSel = d.k === S.sel;
+      const future = d.dt > this.today();
+      cells.push({
+        key: d.k, day: d.dt.getDate(), cursor: 'pointer',
+        bg: isSel ? '#1a1d22' : '#131519',
+        shadow: isToday ? 'inset 0 0 0 1px ' + accent : (isSel ? 'inset 0 0 0 1px #3a414c' : 'none'),
+        numColor: future ? '#3a414c' : (isToday ? accent : '#8a919c'),
+        shiftColor: meta.color, shiftName: meta.name, dotDisp: future ? 'none' : 'inline-block',
+        hasHours: d.hours > 0.008, hours: this.fmtHM(d.hours),
+        isOverride: d.override,
+        onClick: () => this.openDay(d.k)
+      });
+    }
+
+    const projStr = (d) => {
+      const agg = {};
+      for (const s of d.sessions) { const ot = this.overtimeOf(s, d.win); for (const p of s.projects) agg[p.name] = (agg[p.name] || 0) + ot * p.share; }
+      return Object.entries(agg).filter(e => e[1] > 0.008).sort((a, b) => b[1] - a[1]).map(e => e[0] + ' (' + this.fmtHM(e[1]) + ')').join(', ') || '—';
+    };
+
+    const otDays = daysData.filter(d => d.hours > 0.008);
+    const rowOf = (d) => {
+      const meta = this.shiftMeta(d.st);
+      return {
+        key: d.k, date: d.k, shift: meta.name, shiftColor: meta.color,
+        projects: projStr(d), hours: this.fmtHM(d.hours),
+        src: d.override ? 'ręczne' : (d.k === todayKey ? 'jsonl' : 'archiwum'),
+        srcColor: d.override ? accent : '#565d68',
+        bg: d.k === S.sel ? '#1a1d22' : 'transparent',
+        onClick: () => { this.setState({ tab: 'kal' }); this.openDay(d.k); }
+      };
+    };
+    const listRows = otDays.map(rowOf);
+    const repRows = otDays.map(rowOf);
+
+    // report projects
+    const repAgg = {};
+    for (const d of otDays) {
+      const isWe = d.st === 'weekend';
+      const agg = {};
+      for (const s of d.sessions) { const ot = this.overtimeOf(s, d.win); for (const p of s.projects) agg[p.name] = (agg[p.name] || 0) + ot * p.share; }
+      for (const [n, h] of Object.entries(agg)) { const e = repAgg[n] = repAgg[n] || { wd: 0, we: 0 }; if (isWe) e.we += h; else e.wd += h; }
+    }
+    const RATE_WD = 71, RATE_WE = 95;
+    const repProjects = Object.entries(repAgg).filter(([, v]) => v.wd + v.we > 0.008).sort((a, b) => (b[1].wd + b[1].we) - (a[1].wd + a[1].we))
+      .map(([n, v]) => ({ name: n, wd: this.fmtHM(v.wd), we: this.fmtHM(v.we), sum: this.fmtHM(v.wd + v.we), pln: Math.round(v.wd * RATE_WD + v.we * RATE_WE) + ' PLN' }));
+    const plnRows = Object.entries(repAgg).sort((a, b) => (b[1].wd + b[1].we) - (a[1].wd + a[1].we))
+      .map(([n, v]) => ({ name: n, pln: Math.round(v.wd * RATE_WD + v.we * RATE_WE) + ' PLN' }));
+    const plnTotalV = Object.values(repAgg).reduce((a, v) => a + v.wd * RATE_WD + v.we * RATE_WE, 0);
+
+    // all-time project totals
+    const allAgg = {};
+    let cur = new Date(2025, 6, 28);
+    const end = this.today();
+    while (cur <= end) {
+      const dd = this.dayData(cur);
+      for (const s of dd.sessions) {
+        const ot = this.overtimeOf(s, dd.win);
+        const all = s.e - s.s;
+        for (const p of s.projects) { const e = allAgg[p.name] = allAgg[p.name] || { ot: 0, all: 0 }; e.ot += ot * p.share; e.all += all * p.share; }
+      }
+      cur = new Date(cur.getTime() + 86400000);
+    }
+    const mode = S.projMode;
+    const totalAll = Object.values(allAgg).reduce((a, v) => a + (mode === 'ot' ? v.ot : v.all), 0);
+    const maxP = Math.max(...Object.values(allAgg).map(v => mode === 'ot' ? v.ot : v.all), 0.01);
+    const projRows = Object.entries(allAgg).map(([n, v]) => ({ name: n, v: mode === 'ot' ? v.ot : v.all }))
+      .sort((a, b) => b.v - a.v)
+      .map((p, i) => ({ rank: i + 1, name: p.name, hours: this.fmtHM(p.v), barW: Math.round(p.v / maxP * 100), pct: (p.v / totalAll * 100).toFixed(1) }));
+
+    // drawer
+    let d = null;
+    if (S.sel) {
+      const dt = new Date(S.sel + 'T12:00');
+      const dd = this.dayData(dt);
+      const meta = this.shiftMeta(dd.st);
+      const dow = (dt.getDay() + 6) % 7;
+      let lo = dd.win ? dd.win[0] : 8, hi = dd.win ? dd.win[1] : 18;
+      for (const s of dd.sessions) { lo = Math.min(lo, s.s); hi = Math.max(hi, s.e); }
+      lo = Math.max(0, Math.floor(lo) - 1); hi = Math.min(24, Math.ceil(hi) + 1);
+      const span = hi - lo;
+      const pos = (h) => (h - lo) / span * 100;
+      const step = span > 12 ? 3 : (span > 7 ? 2 : 1);
+      const ticks = [];
+      for (let h = Math.ceil(lo); h <= hi; h += step) ticks.push({ l: +pos(h).toFixed(2), label: h + ':00' });
+      const lanes = dd.sessions.map(s => {
+        const segs = [];
+        const push = (a, b, isOt) => { if (b - a < 0.008) return; segs.push({ l: +pos(a).toFixed(2), w: +((b - a) / span * 100).toFixed(2), c: isOt ? accent : '#2b313a', b: isOt ? accent : '#3a414c', tip: this.fmtClock(a) + '–' + this.fmtClock(b) + (isOt ? ' nadgodziny' : ' w oknie') }); };
+        if (!dd.win) push(s.s, s.e, true);
+        else {
+          if (s.s < dd.win[0]) push(s.s, Math.min(s.e, dd.win[0]), true);
+          push(Math.max(s.s, dd.win[0]), Math.min(s.e, dd.win[1]), false);
+          if (s.e > dd.win[1]) push(Math.max(s.s, dd.win[1]), s.e, true);
+        }
+        return { segs };
+      });
+      const sessions = dd.sessions.map(s => {
+        const ot = this.overtimeOf(s, dd.win);
+        return {
+          time: this.fmtClock(s.s) + ' → ' + this.fmtClock(s.e),
+          dur: this.fmtHM(s.e - s.s) + ' h',
+          ot: this.fmtHM(ot), otColor: ot > 0.008 ? accent : '#565d68',
+          projects: s.projects.map(p => ({ name: p.name, pct: Math.round(p.share * 100), hours: this.fmtHM((s.e - s.s) * p.share) }))
+        };
+      });
+      d = {
+        dateLabel: DOWS_FULL[dow] + ', ' + dt.getDate() + ' ' + MONTHS[dt.getMonth()] + ' ' + dt.getFullYear(),
+        shiftName: meta.name, shiftColor: meta.color,
+        windowLabel: dd.win ? 'okno ' + meta.win : 'brak okna — całość to nadgodziny',
+        hasWindow: !!dd.win,
+        bandL: dd.win ? +pos(dd.win[0]).toFixed(2) : 0,
+        bandW: dd.win ? +((dd.win[1] - dd.win[0]) / span * 100).toFixed(2) : 0,
+        axisLabel: this.fmtClock(lo) + ' — ' + this.fmtClock(hi),
+        ticks, lanes, sessions,
+        sessionCount: dd.sessions.length, noSessions: dd.sessions.length === 0,
+        override: dd.override, canLock: !dd.override, computedStr: this.fmtHM(dd.computed), totalStr: this.fmtHM(dd.hours)
+      };
+    }
+
+    const now = new Date(S.rebuildAt);
+    const tabBtn = (t) => ({ bg: S.tab === t ? '#23272e' : 'transparent', fg: S.tab === t ? '#e6e8eb' : '#8a919c' });
+    const tk = tabBtn('kal'), tr = tabBtn('rap'), tp = tabBtn('proj');
+
+    return {
+      accent, showPln,
+      tabKal: () => this.setState({ tab: 'kal' }), tabRap: () => this.setState({ tab: 'rap' }), tabProj: () => this.setState({ tab: 'proj' }),
+      tabKalBg: tk.bg, tabKalFg: tk.fg, tabRapBg: tr.bg, tabRapFg: tr.fg, tabProjBg: tp.bg, tabProjFg: tp.fg,
+      isKal: S.tab === 'kal', isRap: S.tab === 'rap', isProj: S.tab === 'proj',
+      isGrid: variant !== 'lista', isList: variant === 'lista',
+      freshText: String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0'),
+      doRebuild: () => { this.setState({ rebuildAt: Date.now() }); this.showToast('Przeliczono archiwum z JSONL — manual_override zachowane'); },
+      hasToast: !!S.toast, toast: S.toast,
+      monthLabel: MONTHS[S.m - 1] + ' ' + S.y,
+      prevMonth: () => this.nav(-1), nextMonth: () => this.nav(1),
+      monthTotal: this.fmtHM(monthTotal), daysWithOt: daysWithOt,
+      dows: ['pn', 'wt', 'śr', 'cz', 'pt', 'so', 'nd'],
+      cells, listRows,
+      legend: [
+        { name: 'Regularna', color: '#5286c9', window: '6–15' },
+        { name: 'Popołudniowa', color: '#9a7fd1', window: '15–21' },
+        { name: 'Sobota pop.', color: '#3fa08c', window: '8–14' },
+        { name: 'Weekend', color: '#cf5f5f', window: 'cały dzień' }
+      ],
+      drawerOpen: !!d, d: d || {},
+      closeDrawer: () => this.setState({ sel: null }),
+      editVal: S.editVal,
+      onEditChange: (e) => this.setState({ editVal: e.target.value }),
+      saveEdit: () => {
+        const v = this.parseHM(S.editVal);
+        if (v == null) { this.showToast('Nieprawidłowy format — użyj H:MM'); return; }
+        const ov = { ...S.overrides, [S.sel]: v };
+        this.setState({ overrides: ov });
+        this.showToast('Zapisano ręczną korektę (' + this.fmtHM(v) + ') — manual_override');
+      },
+      lockComputed: () => {
+        const dd = this.dayData(new Date(S.sel + 'T12:00'));
+        this.setState({ overrides: { ...S.overrides, [S.sel]: dd.computed } });
+        this.showToast('Zablokowano wartość wyliczoną (manual_override = ON)');
+      },
+      clearOverride: () => {
+        const ov = { ...S.overrides }; delete ov[S.sel];
+        this.setState({ overrides: ov }, () => {
+          const dd = this.dayData(new Date(S.sel + 'T12:00'));
+          this.setState({ editVal: this.fmtHM(dd.hours) });
+        });
+        this.showToast('Przywrócono wartość wyliczoną');
+      },
+      repRows, repProjects, plnRows,
+      plnTotal: Math.round(plnTotalV) + ' PLN',
+      plnRates: RATE_WD + ' PLN/h dzień · ' + RATE_WE + ' PLN/h weekend',
+      exportPdf: () => this.showToast('Wygenerowano ~/nadgodziny_' + MONTHS[S.m - 1] + '_' + S.y + '.pdf'),
+      exportCsv: () => this.showToast('Wyeksportowano CSV — ' + repRows.length + ' wierszy'),
+      modeOt: () => this.setState({ projMode: 'ot' }), modeAll: () => this.setState({ projMode: 'all' }),
+      modeOtBg: mode === 'ot' ? '#23272e' : 'transparent', modeOtFg: mode === 'ot' ? '#e6e8eb' : '#8a919c',
+      modeAllBg: mode === 'all' ? '#23272e' : 'transparent', modeAllFg: mode === 'all' ? '#e6e8eb' : '#8a919c',
+      projRows, projTotal: this.fmtHM(totalAll),
+      projTotalLabel: mode === 'ot' ? 'Suma nadgodzin' : 'Suma wszystkich godzin'
+    };
+  }
+}
+</script>
+</body>
+</html>

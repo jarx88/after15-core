@@ -2,6 +2,10 @@
 
 > Automatyczne liczenie nadgodzin z sesji Claude Code na podstawie harmonogramu zmianowego
 
+Web UI: skopiuj `docs/after15-web.service` do `~/.config/systemd/user/`.
+Uruchom `systemctl --user daemon-reload && systemctl --user enable --now after15-web`.
+W Caddy skieruj wybraną domenę Tailscale na `127.0.0.1:4315`.
+
 ## O projekcie
 
 **After15** to narzedzie CLI napisane w Rust, ktore automatycznie analizuje logi sesji Claude Code i oblicza ile godzin przepracowales poza standardowym czasem pracy. Nazwa pochodzi od godziny 15:00 - konca regularnej zmiany.

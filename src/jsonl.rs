@@ -153,13 +153,12 @@ pub fn load_daily_summary_full(config: &Config, debug: bool) -> DailySummaryData
                     if config.projects.excluded_projects.contains(&normalized) {
                         continue;
                     }
-                    let ph = ProjectHours {
-                        weekday_hours: proj_hours.weekday_hours,
-                        weekend_hours: proj_hours.weekend_hours,
-                        regular_hours: proj_hours.regular_hours,
-                    };
-                    recalculated_hours += ph.weekday_hours + ph.weekend_hours;
-                    day_projects.insert(proj_name, ph);
+                    recalculated_hours += proj_hours.weekday_hours + proj_hours.weekend_hours;
+                    let canonical = canonical_project_key(&proj_name);
+                    let entry = day_projects.entry(canonical).or_default();
+                    entry.weekday_hours += proj_hours.weekday_hours;
+                    entry.weekend_hours += proj_hours.weekend_hours;
+                    entry.regular_hours += proj_hours.regular_hours;
                 }
                 let day_hours = resolve_day_hours(
                     day_data.manual_override,
@@ -496,6 +495,17 @@ const WORKTREE_PATH_MARKER: &str = "/.t3/worktrees/";
 const WORKTREE_DIR_PREFIX: &str = "--t3-worktrees-";
 const WORKTREE_DIR_SUFFIX: &str = "-t3code-";
 
+/// Canonical raw key for a project source so hours from variant names merge:
+/// - Claude Code worktree dirs (`…-<projekt>--claude-worktrees-<id>`) → main project
+/// - legacy `-home-jarx-` prefix → `-home-jarek-`
+fn canonical_project_key(name: &str) -> String {
+    let name = name
+        .split_once("--claude-worktrees-")
+        .map(|(project, _)| project)
+        .unwrap_or(name);
+    name.replace("-home-jarx-", "-home-jarek-")
+}
+
 fn extract_worktree_project_name(encoded: &str) -> Option<&str> {
     let after = encoded.split_once(WORKTREE_DIR_PREFIX)?.1;
     after
@@ -542,7 +552,7 @@ fn extract_project_from_tool_input(entry: &JsonlEntry) -> Option<String> {
     };
 
     let normalized = project_name.replace('_', "-");
-    Some(format!("-home-jarx-Programowanie-{}", normalized))
+    Some(format!("-home-jarek-Programowanie-{}", normalized))
 }
 
 fn build_sessions_from_records(records: &[TimestampRecord], debug: bool) -> Vec<Session> {
@@ -642,10 +652,10 @@ fn extract_project_name(path: &Path) -> String {
             if let Some(project) = extract_worktree_project_name(&parent_name) {
                 if worktree_project_exists_in_programowanie(project) {
                     let normalized = project.replace('_', "-");
-                    return format!("-home-jarx-Programowanie-{}", normalized);
+                    return format!("-home-jarek-Programowanie-{}", normalized);
                 }
             }
-            return parent_name;
+            return canonical_project_key(&parent_name);
         }
     }
 
@@ -681,7 +691,19 @@ mod tests {
             "/home/jarx/.claude/projects/-home-jarx-Programowanie-farmaster2/session.jsonl",
         );
         let name = extract_project_name(path);
-        assert_eq!(name, "-home-jarx-Programowanie-farmaster2");
+        // Legacy jarx prefix is canonicalized to jarek
+        assert_eq!(name, "-home-jarek-Programowanie-farmaster2");
+    }
+
+    #[test]
+    fn claude_worktree_dirs_map_to_main_project() {
+        let path = Path::new(
+            "/home/jarek/.claude/projects/-home-jarek-Programowanie-farmaster2--claude-worktrees-awesome-leakey-d15f52/session.jsonl",
+        );
+        assert_eq!(
+            extract_project_name(path),
+            "-home-jarek-Programowanie-farmaster2"
+        );
     }
 
     #[test]

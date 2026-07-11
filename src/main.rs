@@ -1,17 +1,10 @@
-mod archive;
-mod config;
-mod jsonl;
-mod overtime;
-mod pdf;
-mod report;
-mod schedule;
-mod tui;
-
 use chrono::{Datelike, Local};
 use clap::Parser;
 use fs2::FileExt;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
+
+use after15::{archive, config, jsonl, overtime, pdf, report, schedule, tui, web};
 
 use report::format_hm;
 
@@ -51,11 +44,22 @@ struct Cli {
 
     #[arg(long, help = "Interaktywna edycja dni (TUI)")]
     edit: bool,
+
+    #[arg(long, help = "Uruchom webowy interfejs")]
+    serve: bool,
+
+    #[arg(long, default_value = "127.0.0.1:4315", help = "Adres serwera web")]
+    bind: String,
 }
 
 fn main() {
     let cli = Cli::parse();
     let config = config::load_config();
+
+    if cli.serve {
+        web::serve(&cli.bind);
+        return;
+    }
 
     if cli.edit {
         tui::run();
@@ -63,7 +67,17 @@ fn main() {
     }
 
     if cli.rebuild {
-        rebuild_archive(&config, cli.debug);
+        let _lock = archive::lock_archive();
+        match after15::rebuild_archive(&config, cli.debug) {
+            Ok(stats) => println!(
+                "Przebudowano archiwum: {} dni z JSONL, {} dni łącznie (manual_override zachowane)",
+                stats.updated, stats.total_days
+            ),
+            Err(e) => {
+                eprintln!("[BŁĄD] Nie udało się przebudować archiwum: {}", e);
+                std::process::exit(1);
+            }
+        }
         return;
     }
 
@@ -193,66 +207,20 @@ fn print_project_totals(
 ) {
     use colored::*;
 
-    let tracked_path = &config.projects.tracked_path;
     let hourly_weekday = config.salary.base_monthly_net / config.salary.hours_per_month
         * config.salary.overtime_multiplier_weekday;
     let hourly_weekend = config.salary.base_monthly_net / config.salary.hours_per_month
         * config.salary.overtime_multiplier_weekend;
 
-    let mut totals: HashMap<String, jsonl::ProjectHours> = HashMap::new();
-    let mut first_seen: HashMap<String, chrono::NaiveDate> = HashMap::new();
-    let mut last_seen: HashMap<String, chrono::NaiveDate> = HashMap::new();
-
-    for (date, day_projects) in daily_projects {
-        for (proj_name, hours) in day_projects {
-            let normalized = report::normalize_project_name(proj_name, tracked_path);
-            if config.projects.excluded_projects.contains(&normalized) {
-                continue;
-            }
-            let activity = hours.weekday_hours + hours.weekend_hours + hours.regular_hours;
-            if activity < 0.0001 {
-                continue;
-            }
-            let entry = totals.entry(normalized.clone()).or_default();
-            entry.weekday_hours += hours.weekday_hours;
-            entry.weekend_hours += hours.weekend_hours;
-            entry.regular_hours += hours.regular_hours;
-
-            first_seen
-                .entry(normalized.clone())
-                .and_modify(|d| {
-                    if *date < *d {
-                        *d = *date;
-                    }
-                })
-                .or_insert(*date);
-            last_seen
-                .entry(normalized)
-                .and_modify(|d| {
-                    if *date > *d {
-                        *d = *date;
-                    }
-                })
-                .or_insert(*date);
-        }
-    }
+    let totals = after15::calculate_project_totals(daily_projects, config, full);
 
     if totals.is_empty() {
         println!("{}", "Brak danych projektowych w archiwum.".red());
         return;
     }
 
-    let mut sorted: Vec<_> = totals.iter().collect();
-    sorted.sort_by(|a, b| {
-        let total_a = a.1.weekday_hours + a.1.weekend_hours
-            + if full { a.1.regular_hours } else { 0.0 };
-        let total_b = b.1.weekday_hours + b.1.weekend_hours
-            + if full { b.1.regular_hours } else { 0.0 };
-        total_b.partial_cmp(&total_a).unwrap()
-    });
-
-    let global_first = first_seen.values().min().copied();
-    let global_last = last_seen.values().max().copied();
+    let global_first = totals.iter().map(|p| p.first_seen).min();
+    let global_last = totals.iter().map(|p| p.last_seen).max();
 
     println!();
     let header_title = if full {
@@ -293,7 +261,9 @@ fn print_project_totals(
     let mut total_regular = 0.0;
     let mut total_pln = 0.0;
 
-    for (name, hours) in &sorted {
+    for project in &totals {
+        let name = &project.name;
+        let hours = &project.hours;
         let day_h = hours.weekday_hours;
         let wk_h = hours.weekend_hours;
         let reg_h = hours.regular_hours;
@@ -304,14 +274,8 @@ fn print_project_totals(
         total_regular += reg_h;
         total_pln += pln;
 
-        let first = first_seen
-            .get(*name)
-            .map(|d| d.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        let last = last_seen
-            .get(*name)
-            .map(|d| d.to_string())
-            .unwrap_or_else(|| "-".to_string());
+        let first = project.first_seen.to_string();
+        let last = project.last_seen.to_string();
 
         if full {
             println!(
@@ -374,108 +338,6 @@ fn print_project_totals(
         );
     }
     println!();
-}
-
-fn rebuild_archive(config: &config::Config, debug: bool) {
-    let _lock = archive::lock_archive();
-    let fresh = jsonl::load_all_overtime(config, debug);
-    let mut archive = archive::load_summary();
-
-    let pre_rebuild_days = archive.days.len();
-    if pre_rebuild_days > 0 {
-        match archive::force_backup() {
-            Ok(path) => eprintln!("[INFO] Backup przed rebuild: {}", path.display()),
-            Err(e) => {
-                eprintln!("[BŁĄD] Nie udało się utworzyć backupu: {}", e);
-                std::process::exit(1);
-            }
-        }
-    }
-
-    archive.version = 2;
-
-    let round2 = |v: f64| (v * 100.0).round() / 100.0;
-
-    let mut overwritten_days = 0usize;
-    let mut skipped_manual = 0usize;
-    for (date, hours) in &fresh.hours {
-        let date_str = date.format("%Y-%m-%d").to_string();
-        if archive
-            .days
-            .get(&date_str)
-            .map(|e| e.manual_override)
-            .unwrap_or(false)
-        {
-            skipped_manual += 1;
-            if debug {
-                eprintln!("[DEBUG] Skip {} (manual_override)", date_str);
-            }
-            continue;
-        }
-        let shift_type = schedule::get_shift_type(*date);
-        let projects_entry = fresh.projects.get(date).map(|projs| {
-            projs
-                .iter()
-                .map(|(name, hours)| {
-                    (
-                        name.clone(),
-                        archive::ProjectHoursEntry {
-                            weekday_hours: round2(hours.weekday_hours),
-                            weekend_hours: round2(hours.weekend_hours),
-                            regular_hours: round2(hours.regular_hours),
-                        },
-                    )
-                })
-                .collect()
-        });
-
-        let entry = archive::DayEntry {
-            hours: round2(*hours),
-            formatted: archive::format_hm(*hours),
-            shift: schedule::shift_str(shift_type).to_string(),
-            processed: true,
-            manual_override: false,
-            projects: projects_entry,
-        };
-
-        archive.days.insert(date_str, entry);
-        overwritten_days += 1;
-    }
-
-    let mut monthly_totals: HashMap<String, f64> = HashMap::new();
-    for (date_str, entry) in &archive.days {
-        if let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-            let month_key = format!("{}-{:02}", date.year(), date.month());
-            *monthly_totals.entry(month_key).or_insert(0.0) += entry.hours;
-        }
-    }
-
-    archive.months.clear();
-    for (month, total) in monthly_totals {
-        archive.months.insert(
-            month,
-            archive::MonthEntry {
-                total_hours: total,
-                formatted: archive::format_hm(total),
-            },
-        );
-    }
-
-    let preserved_days = archive
-        .days
-        .len()
-        .saturating_sub(overwritten_days)
-        .saturating_sub(skipped_manual);
-    match archive::save_summary(&archive) {
-        Ok(()) => println!(
-            "Przebudowano archiwum: {} dni z JSONL, {} dni zachowanych z archiwum, {} dni z ręczną korektą (manual_override)",
-            overwritten_days, preserved_days, skipped_manual
-        ),
-        Err(e) => {
-            eprintln!("[BŁĄD] Nie udało się zapisać archiwum: {}", e);
-            std::process::exit(1);
-        }
-    }
 }
 
 fn print_statusline(daily: &HashMap<chrono::NaiveDate, f64>, config: &config::Config) {

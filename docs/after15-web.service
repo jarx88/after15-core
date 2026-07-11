@@ -1,0 +1,10 @@
+[Unit]
+Description=After15 web UI
+After=network.target
+
+[Service]
+ExecStart=%h/.cargo/bin/after15 --serve --bind 0.0.0.0:4315
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

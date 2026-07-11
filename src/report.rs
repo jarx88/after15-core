@@ -325,6 +325,7 @@ fn print_project_tables(
 
             let mut rows: Vec<ProjectRow> = month_projects
                 .iter()
+                .filter(|(_, hours)| hours.weekday_hours + hours.weekend_hours > 0.001)
                 .map(|(name, hours)| {
                     let total_h = hours.weekday_hours + hours.weekend_hours;
                     let pln = (hours.weekday_hours * hourly_weekday)
@@ -378,6 +379,11 @@ pub fn normalize_project_name(raw_name: &str, tracked_path: &str) -> String {
             name = name.replace(prefix, "");
         }
         let name = name.trim_matches('-');
+        // Sesje z worktree Claude'a (…-<projekt>--claude-worktrees-<id>) zbijamy do projektu głównego
+        let name = name
+            .split_once("--claude-worktrees-")
+            .map(|(project, _)| project)
+            .unwrap_or(name);
         if name.is_empty() {
             "Inne".to_string()
         } else {
@@ -420,4 +426,31 @@ pub fn format_hm(hours: f64) -> String {
     let h = total_minutes / 60;
     let m = total_minutes.abs() % 60;
     format!("{}:{:02}", h, m)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_worktree_sessions_collapse_into_main_project() {
+        assert_eq!(
+            normalize_project_name(
+                "-home-jarek-Programowanie-farmaster2--claude-worktrees-awesome-leakey-d15f52",
+                "Programowanie"
+            ),
+            "farmaster2"
+        );
+        assert_eq!(
+            normalize_project_name(
+                "-home-jarek-Programowanie-Eksozycja-apteki--claude-worktrees-busy-nightingale-5d15f8",
+                "Programowanie"
+            ),
+            "Eksozycja-apteki"
+        );
+        assert_eq!(
+            normalize_project_name("-home-jarek-Programowanie-farmaster2", "Programowanie"),
+            "farmaster2"
+        );
+    }
 }
