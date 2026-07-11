@@ -294,12 +294,7 @@ pub fn load_sessions_for_date(date: NaiveDate, config: &Config, debug: bool) -> 
     // -1 day margin covers timezone skew around midnight.
     let files = find_jsonl_files(None, Some(date - chrono::Duration::days(1)), debug);
 
-    let mut all_records: Vec<TimestampRecord> = Vec::new();
-
-    for file_path in &files {
-        let records = collect_timestamps_from_file(file_path);
-        all_records.extend(records);
-    }
+    let mut all_records = collect_timestamps_parallel(&files);
 
     if all_records.is_empty() {
         return Vec::new();
@@ -449,6 +444,32 @@ fn load_overtime_from_files(
     }
 
     result
+}
+
+fn collect_timestamps_parallel(files: &[PathBuf]) -> Vec<TimestampRecord> {
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(files.len().max(1));
+    let chunk_size = files.len().div_ceil(threads.max(1)).max(1);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = files
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    let mut records = Vec::new();
+                    for path in chunk {
+                        records.extend(collect_timestamps_from_file(path));
+                    }
+                    records
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap_or_default())
+            .collect()
+    })
 }
 
 fn collect_timestamps_from_file(path: &Path) -> Vec<TimestampRecord> {
