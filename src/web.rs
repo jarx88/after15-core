@@ -190,7 +190,7 @@ async fn get_month(
         let summary = archive::load_summary_checked().map_err(internal)?;
         let archived_projects = summary_projects(&summary);
         let live = if first.year() == today().year() && first.month() == today().month() {
-            Some(compute_day(today(), &state.config))
+            Some(cached_compute_day(today(), &state.config))
         } else {
             None
         };
@@ -243,13 +243,13 @@ async fn get_month(
     .map_err(join_error)?
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct SessionProject {
     name: String,
     share: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct DaySession {
     start: String,
     end: String,
@@ -276,7 +276,7 @@ struct DayResponse {
     excluded_sessions: Vec<String>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct ComputedDay {
     hours: f64,
     projects: HashMap<String, jsonl::ProjectHours>,
@@ -331,6 +331,25 @@ fn session_projects(session: &jsonl::Session, tracked_path: &str) -> Vec<Session
         .collect();
     projects.sort_by(|a, b| b.share.total_cmp(&a.share));
     projects
+}
+
+// ponytail: unbounded in-process map — a handful of clicked dates, restart clears it
+static DAY_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<NaiveDate, (u64, ComputedDay)>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn cached_compute_day(date: NaiveDate, config: &config::Config) -> ComputedDay {
+    let fingerprint = jsonl::files_fingerprint_for_date(date);
+    if let Some((cached_fp, cached)) = DAY_CACHE.lock().unwrap().get(&date) {
+        if *cached_fp == fingerprint {
+            return cached.clone();
+        }
+    }
+    let computed = compute_day(date, config);
+    DAY_CACHE
+        .lock()
+        .unwrap()
+        .insert(date, (fingerprint, computed.clone()));
+    computed
 }
 
 fn compute_day(date: NaiveDate, config: &config::Config) -> ComputedDay {
@@ -388,7 +407,7 @@ async fn get_day(
 fn day_response(date: NaiveDate, config: &config::Config) -> Result<Json<DayResponse>, ApiError> {
     let summary = archive::load_summary_checked().map_err(internal)?;
     let stored = summary.days.get(&date.to_string());
-    let computed = compute_day(date, config);
+    let computed = cached_compute_day(date, config);
     let window = config
         .work_window_override(date)
         .or_else(|| schedule::get_regular_work_window(date));
@@ -449,7 +468,7 @@ async fn delete_override(
 ) -> Result<Json<DayResponse>, ApiError> {
     let date = parse_date(&date)?;
     mutate_day(state, date, move |summary, config| {
-        let computed = compute_day(date, config);
+        let computed = cached_compute_day(date, config);
         summary.days.insert(
             date.to_string(),
             archive::day_entry(date, computed.hours, Some(&computed.projects), false),
@@ -467,7 +486,7 @@ async fn lock_day(
     mutate_day(state, date, move |summary, config| {
         let key = date.to_string();
         if !summary.days.contains_key(&key) {
-            let computed = compute_day(date, config);
+            let computed = cached_compute_day(date, config);
             summary.days.insert(
                 key.clone(),
                 archive::day_entry(date, computed.hours, Some(&computed.projects), false),

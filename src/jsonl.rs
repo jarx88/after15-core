@@ -446,6 +446,25 @@ fn load_overtime_from_files(
     result
 }
 
+/// Cheap change-detector for the JSONL set relevant to `date`: stats files
+/// (no parsing) and hashes (path, len, mtime). Same fingerprint → sessions
+/// for that date cannot have changed.
+pub fn files_fingerprint_for_date(date: NaiveDate) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let files = find_jsonl_files(None, Some(date - chrono::Duration::days(1)), false);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for path in &files {
+        path.hash(&mut hasher);
+        if let Ok(meta) = fs::metadata(path) {
+            meta.len().hash(&mut hasher);
+            if let Ok(mtime) = meta.modified() {
+                mtime.hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
 fn collect_timestamps_parallel(files: &[PathBuf]) -> Vec<TimestampRecord> {
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
