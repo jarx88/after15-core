@@ -100,8 +100,22 @@ pub struct WorkWindow {
     pub end: NaiveTime,
 }
 
+pub fn shift_from_str(value: &str) -> Option<ShiftType> {
+    match value {
+        "regular" => Some(ShiftType::Regular),
+        "afternoon" => Some(ShiftType::Afternoon),
+        "weekend" => Some(ShiftType::Weekend),
+        "saturday_afternoon" => Some(ShiftType::SaturdayAfternoon),
+        _ => None,
+    }
+}
+
 pub fn get_regular_work_window(date: NaiveDate) -> Option<WorkWindow> {
-    match get_shift_type(date) {
+    window_for_shift(get_shift_type(date))
+}
+
+pub fn window_for_shift(shift: ShiftType) -> Option<WorkWindow> {
+    match shift {
         ShiftType::Regular => Some(WorkWindow {
             start: NaiveTime::from_hms_opt(6, 0, 0).unwrap(),
             end: NaiveTime::from_hms_opt(15, 0, 0).unwrap(),

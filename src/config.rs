@@ -105,6 +105,15 @@ impl<'de> Deserialize<'de> for WorkWindowOverride {
     }
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct ShiftOverride {
+    #[serde(deserialize_with = "deserialize_date")]
+    pub from: NaiveDate,
+    #[serde(deserialize_with = "deserialize_date")]
+    pub to: NaiveDate,
+    pub shift: String,
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct Config {
     #[serde(default)]
@@ -115,6 +124,8 @@ pub struct Config {
     pub telegram: TelegramConfig,
     #[serde(default)]
     pub work_window_overrides: Vec<WorkWindowOverride>,
+    #[serde(default)]
+    pub shift_overrides: Vec<ShiftOverride>,
 }
 
 impl Config {
@@ -139,6 +150,23 @@ impl Config {
 
     pub fn is_tracked_source(&self, raw_project_name: &str) -> bool {
         raw_project_name.contains(&self.projects.tracked_path)
+    }
+
+    pub fn shift_override(&self, date: NaiveDate) -> Option<crate::schedule::ShiftType> {
+        self.shift_overrides
+            .iter()
+            .find(|entry| entry.from <= date && date <= entry.to)
+            .and_then(|entry| crate::schedule::shift_from_str(&entry.shift))
+    }
+
+    pub fn effective_shift(&self, date: NaiveDate) -> crate::schedule::ShiftType {
+        self.shift_override(date)
+            .unwrap_or_else(|| crate::schedule::get_shift_type(date))
+    }
+
+    pub fn effective_work_window(&self, date: NaiveDate) -> Option<WorkWindow> {
+        self.work_window_override(date)
+            .or_else(|| crate::schedule::window_for_shift(self.effective_shift(date)))
     }
 
     pub fn work_window_override(&self, date: NaiveDate) -> Option<WorkWindow> {
@@ -168,10 +196,14 @@ where
     NaiveTime::parse_from_str(&value, "%H:%M").map_err(serde::de::Error::custom)
 }
 
-pub fn load_config() -> Config {
-    let config_path = dirs::config_dir()
+pub fn config_file_path() -> Option<std::path::PathBuf> {
+    dirs::config_dir()
         .map(|p| p.join("after15/config.json"))
-        .or_else(|| dirs::home_dir().map(|p| p.join(".config/after15/config.json")));
+        .or_else(|| dirs::home_dir().map(|p| p.join(".config/after15/config.json")))
+}
+
+pub fn load_config() -> Config {
+    let config_path = config_file_path();
 
     let Some(path) = config_path else {
         eprintln!("[WARN] Nie znaleziono katalogu konfiguracji, uzywam domyslnych wartosci");

@@ -19,8 +19,14 @@ type ApiError = (StatusCode, String);
 
 #[derive(Clone)]
 struct AppState {
-    config: config::Config,
+    config: Arc<std::sync::RwLock<config::Config>>,
     mutation: Arc<Mutex<()>>,
+}
+
+impl AppState {
+    fn config(&self) -> config::Config {
+        self.config.read().unwrap().clone()
+    }
 }
 
 pub fn router() -> Router {
@@ -31,10 +37,11 @@ pub fn router() -> Router {
         .route("/api/day/{date}/override", delete(delete_override))
         .route("/api/day/{date}/lock", post(lock_day))
         .route("/api/rebuild", post(rebuild))
+        .route("/api/shift", axum::routing::put(put_shift))
         .route("/api/projects", get(get_projects))
         .route("/api/report/{file}", get(get_pdf))
         .with_state(AppState {
-            config: config::load_config(),
+            config: Arc::new(std::sync::RwLock::new(config::load_config())),
             mutation: Arc::new(Mutex::new(())),
         })
 }
@@ -187,10 +194,11 @@ async fn get_month(
 ) -> Result<Json<MonthResponse>, ApiError> {
     let first = parse_month(&month)?;
     tokio::task::spawn_blocking(move || {
+        let config = state.config();
         let summary = archive::load_summary_checked().map_err(internal)?;
         let archived_projects = summary_projects(&summary);
         let live = if first.year() == today().year() && first.month() == today().month() {
-            Some(cached_compute_day(today(), &state.config))
+            Some(cached_compute_day(today(), &config))
         } else {
             None
         };
@@ -213,7 +221,7 @@ async fn get_month(
                 date: key,
                 hours,
                 formatted: archive::format_hm(hours),
-                shift: schedule::shift_str(schedule::get_shift_type(date)).to_string(),
+                shift: schedule::shift_str(config.effective_shift(date)).to_string(),
                 manual_override: stored.is_some_and(|day| day.manual_override),
                 source: if stored.is_some_and(|day| day.manual_override) {
                     "ręczne"
@@ -233,8 +241,8 @@ async fn get_month(
             total_hours,
             total_formatted: archive::format_hm(total_hours),
             rates: Rates {
-                weekday_pln: state.config.overtime_rate_weekday(),
-                weekend_pln: state.config.overtime_rate_weekend(),
+                weekday_pln: config.overtime_rate_weekday(),
+                weekend_pln: config.overtime_rate_weekend(),
             },
             days,
         }))
@@ -268,6 +276,7 @@ struct WorkWindowResponse {
 struct DayResponse {
     date: String,
     shift: String,
+    shift_overridden: bool,
     work_window: Option<WorkWindowResponse>,
     sessions: Vec<DaySession>,
     computed_hours: f64,
@@ -399,7 +408,7 @@ async fn get_day(
     Path(date): Path<String>,
 ) -> Result<Json<DayResponse>, ApiError> {
     let date = parse_date(&date)?;
-    tokio::task::spawn_blocking(move || day_response(date, &state.config))
+    tokio::task::spawn_blocking(move || day_response(date, &state.config()))
         .await
         .map_err(join_error)?
 }
@@ -408,12 +417,11 @@ fn day_response(date: NaiveDate, config: &config::Config) -> Result<Json<DayResp
     let summary = archive::load_summary_checked().map_err(internal)?;
     let stored = summary.days.get(&date.to_string());
     let computed = cached_compute_day(date, config);
-    let window = config
-        .work_window_override(date)
-        .or_else(|| schedule::get_regular_work_window(date));
+    let window = config.effective_work_window(date);
     Ok(Json(DayResponse {
         date: date.to_string(),
-        shift: schedule::shift_str(schedule::get_shift_type(date)).to_string(),
+        shift: schedule::shift_str(config.effective_shift(date)).to_string(),
+        shift_overridden: config.shift_override(date).is_some(),
         work_window: window.map(|window| WorkWindowResponse {
             start: window.start.format("%H:%M").to_string(),
             end: window.end.format("%H:%M").to_string(),
@@ -509,7 +517,7 @@ where
         + 'static,
 {
     let _guard = state.mutation.lock().await;
-    let config = state.config.clone();
+    let config = state.config();
     tokio::task::spawn_blocking(move || {
         let _archive_lock = archive::try_lock_archive().ok_or_else(lock_unavailable)?;
         let mut summary = archive::load_summary_checked().map_err(internal)?;
@@ -523,10 +531,11 @@ where
 }
 
 async fn rebuild(State(state): State<AppState>) -> Result<Json<crate::RebuildStats>, ApiError> {
-    let _guard = state.mutation.lock().await;
+    let mutation = state.mutation.clone();
+    let _guard = mutation.lock().await;
     tokio::task::spawn_blocking(move || {
         let _archive_lock = archive::try_lock_archive().ok_or_else(lock_unavailable)?;
-        crate::rebuild_archive(&state.config, false)
+        crate::rebuild_archive(&state.config(), false)
             .map(Json)
             .map_err(internal)
     })
@@ -566,7 +575,7 @@ async fn get_projects(
     tokio::task::spawn_blocking(move || {
         let summary = archive::load_summary_checked().map_err(internal)?;
         let full = mode == "all";
-        let totals = crate::calculate_project_totals(&summary_projects(&summary), &state.config, full);
+        let totals = crate::calculate_project_totals(&summary_projects(&summary), &state.config(), full);
         let values: Vec<_> = totals
             .into_iter()
             .map(|project| {
@@ -609,11 +618,12 @@ async fn get_pdf(
         .ok_or_else(|| bad_request("nazwę raportu (użyj YYYY-MM.pdf)", &file))?
         .to_string();
     parse_month(&month)?;
-    let _guard = state.mutation.lock().await;
+    let mutation = state.mutation.clone();
+    let _guard = mutation.lock().await;
     tokio::task::spawn_blocking(move || {
         let _archive_lock = archive::try_lock_archive().ok_or_else(lock_unavailable)?;
         let summary = archive::load_summary_checked().map_err(internal)?;
-        let path = pdf::generate_pdf(&summary_projects(&summary), &state.config, Some(&month))
+        let path = pdf::generate_pdf(&summary_projects(&summary), &state.config(), Some(&month))
             .map_err(internal)?;
         let bytes = fs::read(path).map_err(|e| internal(e.to_string()))?;
         Ok((
@@ -621,6 +631,75 @@ async fn get_pdf(
             Body::from(bytes),
         )
             .into_response())
+    })
+    .await
+    .map_err(join_error)?
+}
+
+#[derive(Deserialize)]
+struct ShiftInput {
+    from: String,
+    to: String,
+    shift: Option<String>,
+}
+
+async fn put_shift(
+    State(state): State<AppState>,
+    Json(input): Json<ShiftInput>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let from = parse_date(&input.from)?;
+    let to = parse_date(&input.to)?;
+    if to < from || (to - from).num_days() > 62 {
+        return Err(bad_request("zakres dat", &format!("{from} — {to}")));
+    }
+    if let Some(shift) = &input.shift {
+        schedule::shift_from_str(shift).ok_or_else(|| bad_request("zmianę", shift))?;
+    }
+    let mutation = state.mutation.clone();
+    let _guard = mutation.lock().await;
+    tokio::task::spawn_blocking(move || {
+        let path = config::config_file_path()
+            .ok_or_else(|| internal("Nie znaleziono katalogu konfiguracji".into()))?;
+        let mut root: serde_json::Value = if path.exists() {
+            serde_json::from_str(&fs::read_to_string(&path).map_err(|e| internal(e.to_string()))?)
+                .map_err(|e| internal(format!("config.json: {e}")))?
+        } else {
+            serde_json::json!({})
+        };
+        let mut list = root
+            .get("shift_overrides")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        // ponytail: overlapping entries are dropped whole (UI operates day/week-wise)
+        list.retain(|entry| {
+            let get = |k: &str| {
+                entry
+                    .get(k)
+                    .and_then(|v| v.as_str())
+                    .and_then(|v| NaiveDate::parse_from_str(v, "%Y-%m-%d").ok())
+            };
+            match (get("from"), get("to")) {
+                (Some(f), Some(t)) => t < from || f > to,
+                _ => false,
+            }
+        });
+        if let Some(shift) = input.shift {
+            list.push(serde_json::json!({
+                "from": from.to_string(),
+                "to": to.to_string(),
+                "shift": shift,
+            }));
+        }
+        root["shift_overrides"] = serde_json::Value::Array(list);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| internal(e.to_string()))?;
+        }
+        fs::write(&path, serde_json::to_string_pretty(&root).unwrap())
+            .map_err(|e| internal(e.to_string()))?;
+        *state.config.write().unwrap() = config::load_config();
+        DAY_CACHE.lock().unwrap().clear();
+        Ok(Json(serde_json::json!({"ok": true})))
     })
     .await
     .map_err(join_error)?

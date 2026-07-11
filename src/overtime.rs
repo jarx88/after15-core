@@ -106,9 +106,7 @@ fn calculate_regular_for_day(
     end: NaiveTime,
     config: &Config,
 ) -> f64 {
-    let work_window = config
-        .work_window_override(date)
-        .or_else(|| get_regular_work_window(date));
+    let work_window = config.effective_work_window(date);
 
     if let Some(window) = work_window {
         let regular_start = start.max(window.start);
@@ -129,9 +127,7 @@ fn calculate_overtime_for_day(
     end: NaiveTime,
     config: &Config,
 ) -> f64 {
-    let work_window = config
-        .work_window_override(date)
-        .or_else(|| get_regular_work_window(date));
+    let work_window = config.effective_work_window(date);
 
     if let Some(window) = work_window {
         let mut overtime_secs = 0.0;
@@ -167,6 +163,43 @@ mod tests {
             work_window_overrides: vec![WorkWindowOverride { date, start, end }],
             ..Config::default()
         }
+    }
+
+    fn config_with_shift(date: NaiveDate, shift: &str) -> Config {
+        Config {
+            shift_overrides: vec![crate::config::ShiftOverride {
+                from: date,
+                to: date,
+                shift: shift.to_string(),
+            }],
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn shift_override_weekend_makes_weekday_fully_overtime() {
+        // Monday 2025-08-04 is a regular day; override marks it weekend-like.
+        let date = NaiveDate::from_ymd_opt(2025, 8, 4).unwrap();
+        let config = config_with_shift(date, "weekend");
+        let start = NaiveTime::from_hms_opt(8, 0, 0).unwrap();
+        let end = NaiveTime::from_hms_opt(12, 0, 0).unwrap();
+        assert_eq!(
+            calculate_overtime_for_day(date, start, end, &config),
+            4.0 * 3600.0
+        );
+    }
+
+    #[test]
+    fn shift_override_afternoon_moves_window() {
+        // Regular Monday forced to afternoon (15-21): morning work is overtime.
+        let date = NaiveDate::from_ymd_opt(2025, 8, 4).unwrap();
+        let config = config_with_shift(date, "afternoon");
+        let start = NaiveTime::from_hms_opt(8, 0, 0).unwrap();
+        let end = NaiveTime::from_hms_opt(16, 0, 0).unwrap();
+        assert_eq!(
+            calculate_overtime_for_day(date, start, end, &config),
+            7.0 * 3600.0
+        );
     }
 
     #[test]
