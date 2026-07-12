@@ -154,6 +154,7 @@ struct MonthDay {
     shift_overridden: bool,
     manual_override: bool,
     has_note: bool,
+    has_summary: bool,
     source: String,
     projects: Vec<MonthProject>,
 }
@@ -202,6 +203,8 @@ async fn get_month(
         let config = state.config();
         let summary = archive::load_summary_checked().map_err(internal)?;
         let archived_projects = summary_projects(&summary);
+        // presence only — fingerprint check would need a git scan per day
+        let git_summaries = load_git_summaries();
         let live = if first.year() == today().year() && first.month() == today().month() {
             Some(cached_compute_day(today(), &config))
         } else {
@@ -230,6 +233,7 @@ async fn get_month(
                 shift_overridden: config.shift_override(date).is_some(),
                 manual_override: stored.is_some_and(|day| day.manual_override),
                 has_note: stored.is_some_and(|day| day.note.as_deref().is_some_and(|n| !n.is_empty())),
+                has_summary: git_summaries.contains_key(&date.to_string()),
                 source: if stored.is_some_and(|day| day.manual_override) {
                     "ręczne"
                 } else if use_live {
