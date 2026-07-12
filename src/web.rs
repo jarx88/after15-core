@@ -620,6 +620,7 @@ fn save_git_summaries(map: &HashMap<String, (u64, String)>) {
 fn git_fingerprint(projects: &[GitProject]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    "format-v2".hash(&mut hasher); // bump to invalidate summaries after prompt changes
     for project in projects {
         project.project.hash(&mut hasher);
         for commit in &project.commits {
@@ -667,8 +668,9 @@ async fn post_git_summary(
         }
         let mut prompt = format!(
             "Na podstawie poniższej listy commitów gita z dnia {date} napisz po polsku zwięzłe \
-             podsumowanie tego, co zostało zrobione. 3-6 zdań, pogrupuj sensownie per projekt, \
-             pisz o efektach a nie o commitach, bez wstępów, nagłówków i markdownu — zwykły tekst.\n\n"
+             podsumowanie tego, co zostało zrobione. Dla KAŻDEGO projektu osobny akapit w formacie \
+             dokładnie: 'NazwaProjektu: podsumowanie 1-3 zdaniami', akapity rozdzielone pustą linią. \
+             Pisz o efektach a nie o commitach. Bez wstępów, nagłówków i markdownu — zwykły tekst.\n\n"
         );
         for project in &projects {
             prompt.push_str(&format!("Projekt {}:\n", project.project));
