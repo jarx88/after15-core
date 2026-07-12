@@ -37,6 +37,7 @@ pub fn router() -> Router {
         .route("/api/day/{date}/override", delete(delete_override))
         .route("/api/day/{date}/lock", post(lock_day))
         .route("/api/day/{date}/note", axum::routing::put(put_note))
+        .route("/api/day/{date}/git", get(get_day_git))
         .route("/api/rebuild", post(rebuild))
         .route("/api/shift", axum::routing::put(put_shift))
         .route("/api/projects", get(get_projects))
@@ -511,6 +512,79 @@ async fn lock_day(
         Ok(())
     })
     .await
+}
+
+#[derive(Serialize)]
+struct GitCommit {
+    time: String,
+    subject: String,
+}
+
+#[derive(Serialize)]
+struct GitProject {
+    project: String,
+    commits: Vec<GitCommit>,
+}
+
+async fn get_day_git(
+    State(state): State<AppState>,
+    Path(date): Path<String>,
+) -> Result<Json<Vec<GitProject>>, ApiError> {
+    let date = parse_date(&date)?;
+    tokio::task::spawn_blocking(move || {
+        let config = state.config();
+        let root = dirs::home_dir()
+            .map(|h| h.join(&config.projects.tracked_path))
+            .ok_or_else(|| internal("Brak katalogu domowego".into()))?;
+        let mut projects = Vec::new();
+        for entry in fs::read_dir(root).map_err(|e| internal(e.to_string()))?.flatten() {
+            let path = entry.path();
+            // Linked worktrees have a `.git` FILE — the main repo already lists
+            // their commits via --all, so only real `.git` dirs count.
+            if !path.join(".git").is_dir() {
+                continue;
+            }
+            // ponytail: no author filter — single-user repos; pulled foreign commits would show too
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&path)
+                .args([
+                    "log",
+                    "--all",
+                    "--no-merges",
+                    "--since",
+                    &format!("{date} 00:00:00"),
+                    "--until",
+                    &format!("{date} 23:59:59"),
+                    "--date=format-local:%H:%M",
+                    "--pretty=format:%ad\t%s",
+                ])
+                .output();
+            let Ok(output) = output else { continue };
+            let mut commits: Vec<GitCommit> = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let (time, subject) = line.split_once('\t')?;
+                    Some(GitCommit {
+                        time: time.to_string(),
+                        subject: subject.chars().take(120).collect(),
+                    })
+                })
+                .collect();
+            if commits.is_empty() {
+                continue;
+            }
+            commits.sort_by(|a, b| a.time.cmp(&b.time));
+            projects.push(GitProject {
+                project: entry.file_name().to_string_lossy().to_string(),
+                commits,
+            });
+        }
+        projects.sort_by(|a, b| a.project.cmp(&b.project));
+        Ok(Json(projects))
+    })
+    .await
+    .map_err(join_error)?
 }
 
 #[derive(Deserialize)]
