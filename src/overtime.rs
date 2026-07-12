@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::config::Config;
 use crate::jsonl::Session;
-use crate::schedule::{get_regular_work_window, get_shift_type, ShiftType};
+use crate::schedule::{get_shift_type, ShiftType};
 
 pub fn calculate_session_overtime(
     session: &Session,
