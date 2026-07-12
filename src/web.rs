@@ -38,7 +38,7 @@ pub fn router() -> Router {
         .route("/api/day/{date}/lock", post(lock_day))
         .route("/api/day/{date}/note", axum::routing::put(put_note))
         .route("/api/day/{date}/git", get(get_day_git))
-        .route("/api/day/{date}/git-summary", post(post_git_summary))
+        .route("/api/day/{date}/git-summary", get(get_git_summary).post(post_git_summary))
         .route("/api/rebuild", post(rebuild))
         .route("/api/shift", axum::routing::put(put_shift))
         .route("/api/projects", get(get_projects))
@@ -589,9 +589,60 @@ async fn get_day_git(
         .map_err(join_error)?
 }
 
-// AI day summaries are billed per call — cache by commit-set hash so repeat clicks are free.
-static GIT_SUMMARY_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<NaiveDate, (u64, String)>>> =
-    std::sync::LazyLock::new(Default::default);
+// AI day summaries are billed per call — persist by commit-set hash so repeat
+// clicks and page/service restarts don't regenerate (and don't re-bill).
+fn git_summaries_path() -> Option<std::path::PathBuf> {
+    dirs::data_dir()
+        .or_else(|| dirs::home_dir().map(|p| p.join(".local/share")))
+        .map(|p| p.join("claude-overtime/git_summaries.json"))
+}
+
+fn load_git_summaries() -> HashMap<String, (u64, String)> {
+    git_summaries_path()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_default()
+}
+
+fn save_git_summaries(map: &HashMap<String, (u64, String)>) {
+    if let Some(path) = git_summaries_path() {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(path, serde_json::to_string(map).unwrap_or_default());
+    }
+}
+
+fn git_fingerprint(projects: &[GitProject]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for project in projects {
+        project.project.hash(&mut hasher);
+        for commit in &project.commits {
+            commit.time.hash(&mut hasher);
+            commit.subject.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+async fn get_git_summary(
+    State(state): State<AppState>,
+    Path(date): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let date = parse_date(&date)?;
+    tokio::task::spawn_blocking(move || {
+        let projects = collect_day_git(date, &state.config())?;
+        let stored = load_git_summaries();
+        let summary = stored
+            .get(&date.to_string())
+            .filter(|(fp, _)| *fp == git_fingerprint(&projects))
+            .map(|(_, s)| s.clone());
+        Ok(Json(serde_json::json!({"summary": summary})))
+    })
+    .await
+    .map_err(join_error)?
+}
 
 async fn post_git_summary(
     State(state): State<AppState>,
@@ -603,19 +654,9 @@ async fn post_git_summary(
         if projects.is_empty() {
             return Ok(Json(serde_json::json!({"summary": "Brak commitów tego dnia."})));
         }
-        let fingerprint = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            for project in &projects {
-                project.project.hash(&mut hasher);
-                for commit in &project.commits {
-                    commit.time.hash(&mut hasher);
-                    commit.subject.hash(&mut hasher);
-                }
-            }
-            hasher.finish()
-        };
-        if let Some((cached_fp, cached)) = GIT_SUMMARY_CACHE.lock().unwrap().get(&date) {
+        let fingerprint = git_fingerprint(&projects);
+        let mut stored = load_git_summaries();
+        if let Some((cached_fp, cached)) = stored.get(&date.to_string()) {
             if *cached_fp == fingerprint {
                 return Ok(Json(serde_json::json!({"summary": cached})));
             }
@@ -659,10 +700,8 @@ async fn post_git_summary(
         if !output.status.success() || summary.is_empty() {
             return Err(internal("Nie udało się wygenerować podsumowania".into()));
         }
-        GIT_SUMMARY_CACHE
-            .lock()
-            .unwrap()
-            .insert(date, (fingerprint, summary.clone()));
+        stored.insert(date.to_string(), (fingerprint, summary.clone()));
+        save_git_summaries(&stored);
         Ok(Json(serde_json::json!({"summary": summary})))
     })
     .await
