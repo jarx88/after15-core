@@ -38,6 +38,7 @@ pub fn router() -> Router {
         .route("/api/day/{date}/lock", post(lock_day))
         .route("/api/day/{date}/note", axum::routing::put(put_note))
         .route("/api/day/{date}/git", get(get_day_git))
+        .route("/api/day/{date}/git-summary", post(post_git_summary))
         .route("/api/rebuild", post(rebuild))
         .route("/api/shift", axum::routing::put(put_shift))
         .route("/api/projects", get(get_projects))
@@ -526,62 +527,143 @@ struct GitProject {
     commits: Vec<GitCommit>,
 }
 
+fn collect_day_git(date: NaiveDate, config: &config::Config) -> Result<Vec<GitProject>, ApiError> {
+    let root = dirs::home_dir()
+        .map(|h| h.join(&config.projects.tracked_path))
+        .ok_or_else(|| internal("Brak katalogu domowego".into()))?;
+    let mut projects = Vec::new();
+    for entry in fs::read_dir(root).map_err(|e| internal(e.to_string()))?.flatten() {
+        let path = entry.path();
+        // Linked worktrees have a `.git` FILE — the main repo already lists
+        // their commits via --all, so only real `.git` dirs count.
+        if !path.join(".git").is_dir() {
+            continue;
+        }
+        // ponytail: no author filter — single-user repos; pulled foreign commits would show too
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args([
+                "log",
+                "--all",
+                "--no-merges",
+                "--since",
+                &format!("{date} 00:00:00"),
+                "--until",
+                &format!("{date} 23:59:59"),
+                "--date=format-local:%H:%M",
+                "--pretty=format:%ad\t%s",
+            ])
+            .output();
+        let Ok(output) = output else { continue };
+        let mut commits: Vec<GitCommit> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let (time, subject) = line.split_once('\t')?;
+                Some(GitCommit {
+                    time: time.to_string(),
+                    subject: subject.chars().take(120).collect(),
+                })
+            })
+            .collect();
+        if commits.is_empty() {
+            continue;
+        }
+        commits.sort_by(|a, b| a.time.cmp(&b.time));
+        projects.push(GitProject {
+            project: entry.file_name().to_string_lossy().to_string(),
+            commits,
+        });
+    }
+    projects.sort_by(|a, b| a.project.cmp(&b.project));
+    Ok(projects)
+}
+
 async fn get_day_git(
     State(state): State<AppState>,
     Path(date): Path<String>,
 ) -> Result<Json<Vec<GitProject>>, ApiError> {
     let date = parse_date(&date)?;
+    tokio::task::spawn_blocking(move || collect_day_git(date, &state.config()).map(Json))
+        .await
+        .map_err(join_error)?
+}
+
+// AI day summaries are billed per call — cache by commit-set hash so repeat clicks are free.
+static GIT_SUMMARY_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<NaiveDate, (u64, String)>>> =
+    std::sync::LazyLock::new(Default::default);
+
+async fn post_git_summary(
+    State(state): State<AppState>,
+    Path(date): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let date = parse_date(&date)?;
     tokio::task::spawn_blocking(move || {
-        let config = state.config();
-        let root = dirs::home_dir()
-            .map(|h| h.join(&config.projects.tracked_path))
-            .ok_or_else(|| internal("Brak katalogu domowego".into()))?;
-        let mut projects = Vec::new();
-        for entry in fs::read_dir(root).map_err(|e| internal(e.to_string()))?.flatten() {
-            let path = entry.path();
-            // Linked worktrees have a `.git` FILE — the main repo already lists
-            // their commits via --all, so only real `.git` dirs count.
-            if !path.join(".git").is_dir() {
-                continue;
-            }
-            // ponytail: no author filter — single-user repos; pulled foreign commits would show too
-            let output = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&path)
-                .args([
-                    "log",
-                    "--all",
-                    "--no-merges",
-                    "--since",
-                    &format!("{date} 00:00:00"),
-                    "--until",
-                    &format!("{date} 23:59:59"),
-                    "--date=format-local:%H:%M",
-                    "--pretty=format:%ad\t%s",
-                ])
-                .output();
-            let Ok(output) = output else { continue };
-            let mut commits: Vec<GitCommit> = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .filter_map(|line| {
-                    let (time, subject) = line.split_once('\t')?;
-                    Some(GitCommit {
-                        time: time.to_string(),
-                        subject: subject.chars().take(120).collect(),
-                    })
-                })
-                .collect();
-            if commits.is_empty() {
-                continue;
-            }
-            commits.sort_by(|a, b| a.time.cmp(&b.time));
-            projects.push(GitProject {
-                project: entry.file_name().to_string_lossy().to_string(),
-                commits,
-            });
+        let projects = collect_day_git(date, &state.config())?;
+        if projects.is_empty() {
+            return Ok(Json(serde_json::json!({"summary": "Brak commitów tego dnia."})));
         }
-        projects.sort_by(|a, b| a.project.cmp(&b.project));
-        Ok(Json(projects))
+        let fingerprint = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for project in &projects {
+                project.project.hash(&mut hasher);
+                for commit in &project.commits {
+                    commit.time.hash(&mut hasher);
+                    commit.subject.hash(&mut hasher);
+                }
+            }
+            hasher.finish()
+        };
+        if let Some((cached_fp, cached)) = GIT_SUMMARY_CACHE.lock().unwrap().get(&date) {
+            if *cached_fp == fingerprint {
+                return Ok(Json(serde_json::json!({"summary": cached})));
+            }
+        }
+        let mut prompt = format!(
+            "Na podstawie poniższej listy commitów gita z dnia {date} napisz po polsku zwięzłe \
+             podsumowanie tego, co zostało zrobione. 3-6 zdań, pogrupuj sensownie per projekt, \
+             pisz o efektach a nie o commitach, bez wstępów, nagłówków i markdownu — zwykły tekst.\n\n"
+        );
+        for project in &projects {
+            prompt.push_str(&format!("Projekt {}:\n", project.project));
+            for commit in &project.commits {
+                prompt.push_str(&format!("- {} {}\n", commit.time, commit.subject));
+            }
+            prompt.push('\n');
+        }
+        // claude CLI (subscription auth) with the small Haiku model, on demand only
+        let claude_bin = dirs::home_dir()
+            .map(|h| h.join(".local/bin/claude"))
+            .filter(|p| p.exists())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "claude".to_string());
+        use std::io::Write;
+        let mut child = std::process::Command::new("timeout")
+            .args(["120", &claude_bin, "-p", "--model", "claude-haiku-4-5"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| internal(format!("Nie można uruchomić claude: {e}")))?;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(prompt.as_bytes())
+            .map_err(|e| internal(e.to_string()))?;
+        let output = child
+            .wait_with_output()
+            .map_err(|e| internal(e.to_string()))?;
+        let summary = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !output.status.success() || summary.is_empty() {
+            return Err(internal("Nie udało się wygenerować podsumowania".into()));
+        }
+        GIT_SUMMARY_CACHE
+            .lock()
+            .unwrap()
+            .insert(date, (fingerprint, summary.clone()));
+        Ok(Json(serde_json::json!({"summary": summary})))
     })
     .await
     .map_err(join_error)?
