@@ -807,6 +807,7 @@ struct ProjectsResponse {
     projects: Vec<ProjectResponseRow>,
     total_hours: f64,
     total_formatted: String,
+    earned_pln: f64,
 }
 
 async fn get_projects(
@@ -820,7 +821,15 @@ async fn get_projects(
     tokio::task::spawn_blocking(move || {
         let summary = archive::load_summary_checked().map_err(internal)?;
         let full = mode == "all";
-        let totals = crate::calculate_project_totals(&summary_projects(&summary), &state.config(), full);
+        let config = state.config();
+        let totals = crate::calculate_project_totals(&summary_projects(&summary), &config, full);
+        let earned_pln: f64 = totals
+            .iter()
+            .map(|project| {
+                project.hours.weekday_hours * config.overtime_rate_weekday()
+                    + project.hours.weekend_hours * config.overtime_rate_weekend()
+            })
+            .sum();
         let values: Vec<_> = totals
             .into_iter()
             .map(|project| {
@@ -848,6 +857,7 @@ async fn get_projects(
                 .collect(),
             total_hours,
             total_formatted: archive::format_hm(total_hours),
+            earned_pln,
         }))
     })
     .await
