@@ -61,6 +61,7 @@ pub fn serve(bind: &str) {
             std::process::exit(1);
         });
         println!("After15 web: http://{address}");
+        tokio::spawn(auto_summary_loop());
         axum::serve(listener, router()).await.unwrap_or_else(|e| {
             eprintln!("[BŁĄD] Serwer zakończył pracę: {e}");
         });
@@ -531,55 +532,66 @@ struct GitProject {
     commits: Vec<GitCommit>,
 }
 
+fn repo_commits(path: &std::path::Path, date: NaiveDate) -> Option<GitProject> {
+    // ponytail: no author filter — single-user repos; pulled foreign commits would show too
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args([
+            "log",
+            // t3 tworzy refs/t3/checkpoints/* przy kazdej turze agenta. To nie sa
+            // commity uzytkownika, zasmiecalyby podsumowanie AI.
+            "--exclude=refs/t3/*",
+            "--all",
+            "--no-merges",
+            "--since",
+            &format!("{date} 00:00:00"),
+            "--until",
+            &format!("{date} 23:59:59"),
+            "--date=format-local:%H:%M",
+            "--pretty=format:%ad\t%s",
+        ])
+        .output()
+        .ok()?;
+    let mut commits: Vec<GitCommit> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (time, subject) = line.split_once('\t')?;
+            Some(GitCommit {
+                time: time.to_string(),
+                subject: subject.chars().take(120).collect(),
+            })
+        })
+        .collect();
+    if commits.is_empty() {
+        return None;
+    }
+    commits.sort_by(|a, b| a.time.cmp(&b.time));
+    Some(GitProject {
+        project: path.file_name()?.to_string_lossy().to_string(),
+        commits,
+    })
+}
+
 fn collect_day_git(date: NaiveDate, config: &config::Config) -> Result<Vec<GitProject>, ApiError> {
-    let root = dirs::home_dir()
-        .map(|h| h.join(&config.projects.tracked_path))
-        .ok_or_else(|| internal("Brak katalogu domowego".into()))?;
-    let mut projects = Vec::new();
-    for entry in fs::read_dir(root).map_err(|e| internal(e.to_string()))?.flatten() {
-        let path = entry.path();
+    let home = dirs::home_dir().ok_or_else(|| internal("Brak katalogu domowego".into()))?;
+    let root = home.join(&config.projects.tracked_path);
+    let mut repos: Vec<std::path::PathBuf> = fs::read_dir(root)
+        .map_err(|e| internal(e.to_string()))?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    // Repozytoria spoza tracked_path, np. ~/after15-core.
+    repos.extend(config.projects.extra_git_paths.iter().map(|p| home.join(p)));
+    let mut projects: Vec<GitProject> = repos
+        .iter()
         // Linked worktrees have a `.git` FILE — the main repo already lists
         // their commits via --all, so only real `.git` dirs count.
-        if !path.join(".git").is_dir() {
-            continue;
-        }
-        // ponytail: no author filter — single-user repos; pulled foreign commits would show too
-        let output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&path)
-            .args([
-                "log",
-                "--all",
-                "--no-merges",
-                "--since",
-                &format!("{date} 00:00:00"),
-                "--until",
-                &format!("{date} 23:59:59"),
-                "--date=format-local:%H:%M",
-                "--pretty=format:%ad\t%s",
-            ])
-            .output();
-        let Ok(output) = output else { continue };
-        let mut commits: Vec<GitCommit> = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| {
-                let (time, subject) = line.split_once('\t')?;
-                Some(GitCommit {
-                    time: time.to_string(),
-                    subject: subject.chars().take(120).collect(),
-                })
-            })
-            .collect();
-        if commits.is_empty() {
-            continue;
-        }
-        commits.sort_by(|a, b| a.time.cmp(&b.time));
-        projects.push(GitProject {
-            project: entry.file_name().to_string_lossy().to_string(),
-            commits,
-        });
-    }
+        .filter(|path| path.join(".git").is_dir())
+        .filter_map(|path| repo_commits(path, date))
+        .collect();
     projects.sort_by(|a, b| a.project.cmp(&b.project));
+    projects.dedup_by(|a, b| a.project == b.project);
     Ok(projects)
 }
 
@@ -649,69 +661,91 @@ async fn get_git_summary(
     .map_err(join_error)?
 }
 
+// Zwraca zapisane podsumowanie albo generuje nowe. Wywolanie AI jest platne,
+// wiec generujemy tylko gdy odcisk zestawu commitow sie zmienil.
+fn ensure_git_summary(date: NaiveDate, config: &config::Config) -> Result<String, ApiError> {
+    let projects = collect_day_git(date, config)?;
+    if projects.is_empty() {
+        return Ok("Brak commitów tego dnia.".to_string());
+    }
+    let fingerprint = git_fingerprint(&projects);
+    let mut stored = load_git_summaries();
+    if let Some((cached_fp, cached)) = stored.get(&date.to_string()) {
+        if *cached_fp == fingerprint {
+            return Ok(cached.clone());
+        }
+    }
+    let mut prompt = format!(
+        "Na podstawie poniższej listy commitów gita z dnia {date} napisz po polsku zwięzłe \
+         podsumowanie tego, co zostało zrobione. Dla KAŻDEGO projektu osobny akapit w formacie \
+         dokładnie: 'NazwaProjektu: podsumowanie 1-3 zdaniami', akapity rozdzielone pustą linią. \
+         Pisz o efektach a nie o commitach. Bez wstępów, nagłówków i markdownu — zwykły tekst.\n\n"
+    );
+    for project in &projects {
+        prompt.push_str(&format!("Projekt {}:\n", project.project));
+        for commit in &project.commits {
+            prompt.push_str(&format!("- {} {}\n", commit.time, commit.subject));
+        }
+        prompt.push('\n');
+    }
+    // claude CLI (subscription auth) with the small Haiku model
+    let claude_bin = dirs::home_dir()
+        .map(|h| h.join(".local/bin/claude"))
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "claude".to_string());
+    use std::io::Write;
+    let mut child = std::process::Command::new("timeout")
+        .args(["120", &claude_bin, "-p", "--model", "claude-haiku-4-5"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| internal(format!("Nie można uruchomić claude: {e}")))?;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(prompt.as_bytes())
+        .map_err(|e| internal(e.to_string()))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| internal(e.to_string()))?;
+    let summary = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() || summary.is_empty() {
+        return Err(internal("Nie udało się wygenerować podsumowania".into()));
+    }
+    stored.insert(date.to_string(), (fingerprint, summary.clone()));
+    save_git_summaries(&stored);
+    Ok(summary)
+}
+
 async fn post_git_summary(
     State(state): State<AppState>,
     Path(date): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let date = parse_date(&date)?;
     tokio::task::spawn_blocking(move || {
-        let projects = collect_day_git(date, &state.config())?;
-        if projects.is_empty() {
-            return Ok(Json(serde_json::json!({"summary": "Brak commitów tego dnia."})));
-        }
-        let fingerprint = git_fingerprint(&projects);
-        let mut stored = load_git_summaries();
-        if let Some((cached_fp, cached)) = stored.get(&date.to_string()) {
-            if *cached_fp == fingerprint {
-                return Ok(Json(serde_json::json!({"summary": cached})));
-            }
-        }
-        let mut prompt = format!(
-            "Na podstawie poniższej listy commitów gita z dnia {date} napisz po polsku zwięzłe \
-             podsumowanie tego, co zostało zrobione. Dla KAŻDEGO projektu osobny akapit w formacie \
-             dokładnie: 'NazwaProjektu: podsumowanie 1-3 zdaniami', akapity rozdzielone pustą linią. \
-             Pisz o efektach a nie o commitach. Bez wstępów, nagłówków i markdownu — zwykły tekst.\n\n"
-        );
-        for project in &projects {
-            prompt.push_str(&format!("Projekt {}:\n", project.project));
-            for commit in &project.commits {
-                prompt.push_str(&format!("- {} {}\n", commit.time, commit.subject));
-            }
-            prompt.push('\n');
-        }
-        // claude CLI (subscription auth) with the small Haiku model, on demand only
-        let claude_bin = dirs::home_dir()
-            .map(|h| h.join(".local/bin/claude"))
-            .filter(|p| p.exists())
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| "claude".to_string());
-        use std::io::Write;
-        let mut child = std::process::Command::new("timeout")
-            .args(["120", &claude_bin, "-p", "--model", "claude-haiku-4-5"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| internal(format!("Nie można uruchomić claude: {e}")))?;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(prompt.as_bytes())
-            .map_err(|e| internal(e.to_string()))?;
-        let output = child
-            .wait_with_output()
-            .map_err(|e| internal(e.to_string()))?;
-        let summary = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !output.status.success() || summary.is_empty() {
-            return Err(internal("Nie udało się wygenerować podsumowania".into()));
-        }
-        stored.insert(date.to_string(), (fingerprint, summary.clone()));
-        save_git_summaries(&stored);
-        Ok(Json(serde_json::json!({"summary": summary})))
+        ensure_git_summary(date, &state.config())
+            .map(|summary| Json(serde_json::json!({ "summary": summary })))
     })
     .await
     .map_err(join_error)?
+}
+
+// Raz na godzine dopisuje brakujace podsumowanie wczorajszego dnia. Gdy jest juz
+// zapisane i commity sie nie zmienily, ensure_git_summary nie wola AI.
+async fn auto_summary_loop() {
+    loop {
+        let date = today() - Duration::days(1);
+        let task = tokio::task::spawn_blocking(move || {
+            ensure_git_summary(date, &config::load_config())
+        });
+        if let Ok(Err((_, message))) = task.await {
+            eprintln!("[WARN] Auto-podsumowanie {date} nieudane: {message}");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    }
 }
 
 #[derive(Deserialize)]
