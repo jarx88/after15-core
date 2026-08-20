@@ -27,6 +27,10 @@ impl Default for SalaryConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct ProjectsConfig {
     pub tracked_path: String,
+    /// Repozytoria spoza `tracked_path`, sciezki wzgledem katalogu domowego.
+    /// Licza sie tylko do podsumowan git/AI, nie do godzin nadgodzin.
+    #[serde(default)]
+    pub extra_git_paths: Vec<String>,
     #[serde(default)]
     pub excluded_projects: Vec<String>,
     #[serde(default)]
@@ -37,6 +41,7 @@ impl Default for ProjectsConfig {
     fn default() -> Self {
         Self {
             tracked_path: "Programowanie".to_string(),
+            extra_git_paths: vec![],
             excluded_projects: vec![],
             excluded_sources: vec![],
         }
