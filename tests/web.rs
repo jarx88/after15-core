@@ -77,6 +77,8 @@ async fn web_contract_and_mutations_are_isolated() {
         start_time: NaiveDateTime::parse_from_str("2026-07-01 21:30:00", "%F %T").unwrap(),
         end_time: NaiveDateTime::parse_from_str("2026-07-01 23:30:00", "%F %T").unwrap(),
         duration_seconds: 7200,
+        has_claude: true,
+        has_codex: false,
     };
     let clipped = web::clip_session_to_date(&session, NaiveDate::from_ymd_opt(2026, 7, 2).unwrap()).unwrap();
     assert_eq!(clipped.duration_seconds, 5400);

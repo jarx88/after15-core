@@ -10,7 +10,7 @@ use report::format_hm;
 
 #[derive(Parser)]
 #[command(name = "after15")]
-#[command(about = "Overtime calculator for Claude Code sessions")]
+#[command(about = "Kalkulator nadgodzin z sesji Claude Code i Codex")]
 struct Cli {
     #[arg(long, help = "Show compact statusline (today/month)")]
     statusline: bool,
@@ -68,7 +68,7 @@ fn main() {
 
     if cli.rebuild {
         let _lock = archive::lock_archive();
-        match after15::rebuild_archive(&config, cli.debug) {
+        match after15::rebuild_archive(&config, cli.debug, None) {
             Ok(stats) => println!(
                 "Przebudowano archiwum: {} dni z JSONL, {} dni łącznie (manual_override zachowane)",
                 stats.updated, stats.total_days

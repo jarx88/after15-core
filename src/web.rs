@@ -274,6 +274,7 @@ struct DaySession {
     end: String,
     duration_s: i64,
     overtime_h: f64,
+    source: &'static str,
     projects: Vec<SessionProject>,
 }
 
@@ -325,6 +326,8 @@ pub fn clip_session_to_date(session: &jsonl::Session, date: NaiveDate) -> Option
         start_time: clipped_start.naive_utc(),
         end_time: clipped_end.naive_utc(),
         duration_seconds: (clipped_end - clipped_start).num_seconds(),
+        has_claude: session.has_claude,
+        has_codex: session.has_codex,
     })
 }
 
@@ -409,6 +412,11 @@ fn compute_day(date: NaiveDate, config: &config::Config) -> ComputedDay {
             },
             duration_s: clipped.duration_seconds,
             overtime_h,
+            source: match (clipped.has_claude, clipped.has_codex) {
+                (true, true) => "mixed",
+                (false, true) => "codex",
+                _ => "claude",
+            },
             projects,
         });
     }
@@ -631,6 +639,14 @@ fn git_fingerprint(projects: &[GitProject]) -> u64 {
     hasher.finish()
 }
 
+fn git_summary_error(stderr: &str) -> String {
+    if stderr.contains("OAuth session expired") {
+        "Sesja Claude wygasła — zaloguj się ponownie w terminalu poleceniem `claude`.".to_string()
+    } else {
+        "Nie udało się wygenerować podsumowania".to_string()
+    }
+}
+
 async fn get_git_summary(
     State(state): State<AppState>,
     Path(date): Path<String>,
@@ -679,7 +695,11 @@ async fn post_git_summary(
             }
             prompt.push('\n');
         }
-        // claude CLI (subscription auth) with the small Haiku model, on demand only
+        // claude CLI (subscription auth) with the small Haiku model, on demand only.
+        // --strict-mcp-config i --setting-sources '' są nośne: bez nich każde wywołanie startuje
+        // wszystkie serwery MCP, hooki i pluginy z ~/.claude (~5,7 s CPU i ~324 MB zamiast ~0,9 s),
+        // a lista commitów staje się osiągalna dla serwerów pamięci w rodzaju Hindsight.
+        // Nie dodawać --tools '': zmierzone 140 s wobec 29 s bez tej flagi.
         let claude_bin = dirs::home_dir()
             .map(|h| h.join(".local/bin/claude"))
             .filter(|p| p.exists())
@@ -687,10 +707,19 @@ async fn post_git_summary(
             .unwrap_or_else(|| "claude".to_string());
         use std::io::Write;
         let mut child = std::process::Command::new("timeout")
-            .args(["120", &claude_bin, "-p", "--model", "claude-haiku-4-5"])
+            .args([
+                "120",
+                &claude_bin,
+                "-p",
+                "--model",
+                "claude-haiku-4-5",
+                "--strict-mcp-config",
+                "--setting-sources",
+                "",
+            ])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| internal(format!("Nie można uruchomić claude: {e}")))?;
         child
@@ -704,7 +733,7 @@ async fn post_git_summary(
             .map_err(|e| internal(e.to_string()))?;
         let summary = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !output.status.success() || summary.is_empty() {
-            return Err(internal("Nie udało się wygenerować podsumowania".into()));
+            return Err(internal(git_summary_error(&String::from_utf8_lossy(&output.stderr))));
         }
         stored.insert(date.to_string(), (fingerprint, summary.clone()));
         save_git_summaries(&stored);
@@ -775,12 +804,21 @@ where
     .map_err(join_error)?
 }
 
-async fn rebuild(State(state): State<AppState>) -> Result<Json<crate::RebuildStats>, ApiError> {
+#[derive(Deserialize)]
+struct RebuildQuery {
+    days: Option<i64>,
+}
+
+async fn rebuild(
+    State(state): State<AppState>,
+    Query(query): Query<RebuildQuery>,
+) -> Result<Json<crate::RebuildStats>, ApiError> {
+    let recent_days = query.days.filter(|d| (1..=365).contains(d));
     let mutation = state.mutation.clone();
     let _guard = mutation.lock().await;
     tokio::task::spawn_blocking(move || {
         let _archive_lock = archive::try_lock_archive().ok_or_else(lock_unavailable)?;
-        crate::rebuild_archive(&state.config(), false)
+        crate::rebuild_archive(&state.config(), false, recent_days)
             .map(Json)
             .map_err(internal)
     })
@@ -963,4 +1001,15 @@ fn lock_unavailable() -> ApiError {
 
 fn join_error(error: tokio::task::JoinError) -> ApiError {
     internal(format!("Błąd zadania serwera: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::git_summary_error;
+
+    #[test]
+    fn reports_expired_claude_session() {
+        assert!(git_summary_error("Failed to authenticate: OAuth session expired")
+            .starts_with("Sesja Claude wygasła"));
+    }
 }

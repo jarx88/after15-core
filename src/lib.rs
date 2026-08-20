@@ -18,8 +18,18 @@ pub struct RebuildStats {
     pub total_days: usize,
 }
 
-pub fn rebuild_archive(config: &config::Config, debug: bool) -> Result<RebuildStats, String> {
-    let fresh = jsonl::load_all_overtime(config, debug);
+/// `recent_days = Some(n)` przelicza tylko ostatnie n dni (parsuje kilkaset
+/// plików zamiast całych ~5 GB archiwum JSONL); `None` = pełne przeliczenie.
+pub fn rebuild_archive(
+    config: &config::Config,
+    debug: bool,
+    recent_days: Option<i64>,
+) -> Result<RebuildStats, String> {
+    let cutoff = recent_days.map(|d| chrono::Local::now().date_naive() - chrono::Duration::days(d));
+    let fresh = match recent_days {
+        Some(days) => jsonl::load_recent_overtime(days, config, debug),
+        None => jsonl::load_all_overtime(config, debug),
+    };
     let mut summary = archive::load_summary_checked()?;
 
     if !summary.days.is_empty() {
@@ -29,6 +39,11 @@ pub fn rebuild_archive(config: &config::Config, debug: bool) -> Result<RebuildSt
 
     let mut updated = 0;
     for (date, hours) in &fresh.hours {
+        // Dni sprzed cutoffu mają w oknie tylko część plików — nie nadpisujemy
+        // ich niepełną wartością.
+        if cutoff.is_some_and(|c| *date < c) {
+            continue;
+        }
         let key = date.format("%Y-%m-%d").to_string();
         if summary.days.get(&key).is_some_and(|day| day.manual_override) {
             continue;

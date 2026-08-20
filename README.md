@@ -1,6 +1,6 @@
 # After15 - Kalkulator Nadgodzin
 
-> Automatyczne liczenie nadgodzin z sesji Claude Code na podstawie harmonogramu zmianowego
+> Automatyczne liczenie nadgodzin z sesji Claude Code i Codex na podstawie harmonogramu zmianowego
 
 Web UI: skopiuj `docs/after15-web.service` do `~/.config/systemd/user/`.
 Uruchom `systemctl --user daemon-reload && systemctl --user enable --now after15-web`.
@@ -8,12 +8,12 @@ W Caddy skieruj wybraną domenę Tailscale na `127.0.0.1:4315`.
 
 ## O projekcie
 
-**After15** to narzedzie CLI napisane w Rust, ktore automatycznie analizuje logi sesji Claude Code i oblicza ile godzin przepracowales poza standardowym czasem pracy. Nazwa pochodzi od godziny 15:00 - konca regularnej zmiany.
+**After15** to narzedzie CLI napisane w Rust, ktore automatycznie analizuje logi sesji Claude Code i Codex oraz oblicza ile godzin przepracowales poza standardowym czasem pracy. Nazwa pochodzi od godziny 15:00 - konca regularnej zmiany.
 
 ### Jak to dziala?
 
 ```
-Logi Claude Code (.jsonl)
+Logi Claude Code + Codex (.jsonl)
          |
          v
    +-------------+
@@ -26,8 +26,8 @@ Logi Claude Code (.jsonl)
 ```
 
 Program:
-1. Skanuje pliki JSONL z `~/.claude/projects/` i `~/.claude/transcripts/`
-2. Wykrywa sesje pracy (przerwa >30 min = nowa sesja)
+1. Skanuje pliki JSONL z `~/.claude/projects/`, `~/.claude/transcripts/` i `~/.codex/sessions/`
+2. Wykrywa sesje pracy we wspolnej osi czasu (przerwa >30 min = nowa sesja), wiec rownolegla praca w Claude i Codex nie jest liczona podwojnie
 3. Przypisuje godziny do projektow na podstawie sciezek plikow
 4. Oblicza ktore godziny to nadgodziny wedlug Twojego grafiku
 5. Generuje raporty z podzialem na dni, miesiace i projekty
