@@ -833,6 +833,7 @@ struct ProjectResponseRow {
     hours: f64,
     formatted: String,
     share_pct: f64,
+    pln: f64,
 }
 
 #[derive(Serialize)]
@@ -841,6 +842,7 @@ struct ProjectsResponse {
     projects: Vec<ProjectResponseRow>,
     total_hours: f64,
     total_formatted: String,
+    earned_pln: f64,
 }
 
 async fn get_projects(
@@ -854,22 +856,26 @@ async fn get_projects(
     tokio::task::spawn_blocking(move || {
         let summary = archive::load_summary_checked().map_err(internal)?;
         let full = mode == "all";
-        let totals = crate::calculate_project_totals(&summary_projects(&summary), &state.config(), full);
+        let config = state.config();
+        let totals = crate::calculate_project_totals(&summary_projects(&summary), &config, full);
         let values: Vec<_> = totals
             .into_iter()
             .map(|project| {
                 let hours = project.hours.weekday_hours
                     + project.hours.weekend_hours
                     + if full { project.hours.regular_hours } else { 0.0 };
-                (project.name, hours)
+                let pln = project.hours.weekday_hours * config.overtime_rate_weekday()
+                    + project.hours.weekend_hours * config.overtime_rate_weekend();
+                (project.name, hours, pln)
             })
             .collect();
-        let total_hours: f64 = values.iter().map(|(_, hours)| hours).sum();
+        let total_hours: f64 = values.iter().map(|(_, hours, _)| hours).sum();
+        let earned_pln: f64 = values.iter().map(|(_, _, pln)| pln).sum();
         Ok(Json(ProjectsResponse {
             mode,
             projects: values
                 .into_iter()
-                .map(|(name, hours)| ProjectResponseRow {
+                .map(|(name, hours, pln)| ProjectResponseRow {
                     name,
                     hours,
                     formatted: archive::format_hm(hours),
@@ -878,10 +884,12 @@ async fn get_projects(
                     } else {
                         hours / total_hours * 100.0
                     },
+                    pln,
                 })
                 .collect(),
             total_hours,
             total_formatted: archive::format_hm(total_hours),
+            earned_pln,
         }))
     })
     .await
