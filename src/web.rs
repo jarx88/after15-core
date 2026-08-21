@@ -914,12 +914,21 @@ fn current_month() -> String {
     format!("{}-{:02}", today.year(), today.month())
 }
 
+/// Miesiące bieżącego roku, po kluczu "RRRR-MM".
+fn this_year_months(
+    summary: &archive::DailySummaryFile,
+) -> impl Iterator<Item = (&String, &archive::MonthEntry)> {
+    let prefix = format!("{}-", crate::current_year());
+    summary
+        .months
+        .iter()
+        .filter(move |(key, _)| key.starts_with(&prefix))
+}
+
 /// Średnia z zamkniętych miesięcy — bieżący jest niepełny i zaniżałby wynik.
 fn month_average(summary: &archive::DailySummaryFile) -> (f64, usize) {
     let current = current_month();
-    let past: Vec<f64> = summary
-        .months
-        .iter()
+    let past: Vec<f64> = this_year_months(summary)
         .filter(|(key, _)| key.as_str() != current)
         .map(|(_, month)| month.total_hours)
         .collect();
@@ -934,9 +943,7 @@ async fn get_months() -> Result<Json<MonthsResponse>, ApiError> {
     tokio::task::spawn_blocking(move || {
         let summary = archive::load_summary_checked().map_err(internal)?;
         let current = current_month();
-        let months: Vec<MonthsRow> = summary
-            .months
-            .iter()
+        let months: Vec<MonthsRow> = this_year_months(&summary)
             .map(|(key, month)| MonthsRow {
                 month: key.clone(),
                 hours: month.total_hours,

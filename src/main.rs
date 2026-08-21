@@ -36,7 +36,7 @@ struct Cli {
     #[arg(long, help = "Send daily_summary.json backup via Telegram")]
     backup: bool,
 
-    #[arg(long, help = "Pokaż sumę godzin per projekt od początku monitorowania")]
+    #[arg(long, help = "Pokaż sumę godzin per projekt od początku bieżącego roku")]
     project_totals: bool,
 
     #[arg(long, help = "Z --project-totals: uwzględnij także godziny w ramach godzin pracy")]
@@ -226,7 +226,7 @@ fn print_project_totals(
     let header_title = if full {
         "[SUMA GODZIN PER PROJEKT — pełny kontekst (nadgodziny + godziny pracy)]"
     } else {
-        "[SUMA GODZIN PER PROJEKT — od początku monitorowania]"
+        "[SUMA GODZIN PER PROJEKT — od początku bieżącego roku]"
     };
     println!("{}", header_title.cyan().bold());
     if let (Some(f), Some(l)) = (global_first, global_last) {

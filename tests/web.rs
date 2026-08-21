@@ -36,9 +36,11 @@ async fn web_contract_and_mutations_are_isolated() {
         "days": {
             "2026-07-01": {"hours": 2.0, "formatted": "2:00", "shift": "regular", "processed": true, "manual_override": true,
                 "projects": {"Programowanie/demo": {"weekday_hours": 2.0, "weekend_hours": 0.0}}},
-            "2026-07-02": {"hours": 1.0, "formatted": "1:00", "shift": "regular", "processed": true}
+            "2026-07-02": {"hours": 1.0, "formatted": "1:00", "shift": "regular", "processed": true},
+            "2025-12-15": {"hours": 5.0, "formatted": "5:00", "shift": "regular", "processed": true,
+                "projects": {"Programowanie/zeszloroczny": {"weekday_hours": 5.0, "weekend_hours": 0.0}}}
         },
-        "months": {"2026-06": {"total_hours": 5.0, "formatted": "5:00"}, "2026-07": {"total_hours": 3.0, "formatted": "3:00"}}
+        "months": {"2025-12": {"total_hours": 5.0, "formatted": "5:00"}, "2026-06": {"total_hours": 5.0, "formatted": "5:00"}, "2026-07": {"total_hours": 3.0, "formatted": "3:00"}}
     })).unwrap()).unwrap();
 
     let app = web::router();
@@ -54,6 +56,11 @@ async fn web_contract_and_mutations_are_isolated() {
     assert_eq!(trend["months"][1]["formatted"], "3:00");
     assert_eq!(trend["average_formatted"], "4:00");
     assert_eq!(trend["total_formatted"], "8:00");
+
+    let (status, projects) = request(&app, "GET", "/api/projects?mode=overtime", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(projects["total_formatted"], "2:00");
+    assert!(!projects.to_string().contains("zeszloroczny"));
 
     for uri in ["/api/month/2026-13", "/api/day/2026-02-30", "/api/report/nope.pdf"] {
         assert_eq!(request(&app, "GET", uri, None).await.0, StatusCode::BAD_REQUEST);

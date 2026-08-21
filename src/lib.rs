@@ -8,7 +8,7 @@ pub mod schedule;
 pub mod tui;
 pub mod web;
 
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -64,6 +64,15 @@ pub fn rebuild_archive(
     })
 }
 
+/// Podsumowania zbiorcze liczymy tylko za bieżący rok — starsze miesiące
+/// zostają w archiwum i w widoku miesięcznym, ale nie wchodzą do sum i średnich.
+pub fn current_year() -> i32 {
+    chrono::Utc::now()
+        .with_timezone(&chrono_tz::Europe::Warsaw)
+        .date_naive()
+        .year()
+}
+
 #[derive(Clone)]
 pub struct ProjectTotal {
     pub name: String,
@@ -78,7 +87,11 @@ pub fn calculate_project_totals(
     full: bool,
 ) -> Vec<ProjectTotal> {
     let mut totals: HashMap<String, ProjectTotal> = HashMap::new();
+    let year = current_year();
     for (date, projects) in daily_projects {
+        if date.year() != year {
+            continue;
+        }
         for (raw_name, hours) in projects {
             let name = report::normalize_project_name(raw_name, &config.projects.tracked_path);
             if config.projects.excluded_projects.contains(&name) {
