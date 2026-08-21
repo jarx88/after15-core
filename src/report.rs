@@ -37,7 +37,12 @@ pub fn print_full_report(
             .map(|(d, h)| (*d, *h))
             .collect()
     } else {
-        daily.clone()
+        // bez --month liczymy tylko bieżący rok
+        daily
+            .iter()
+            .filter(|(date, _)| date.year() == today.year())
+            .map(|(d, h)| (*d, *h))
+            .collect()
     };
 
     let filtered_projects: HashMap<NaiveDate, HashMap<String, ProjectHours>> =
@@ -51,7 +56,11 @@ pub fn print_full_report(
                 .map(|(d, p)| (*d, p.clone()))
                 .collect()
         } else {
-            projects.clone()
+            projects
+                .iter()
+                .filter(|(date, _)| date.year() == today.year())
+                .map(|(d, p)| (*d, p.clone()))
+                .collect()
         };
 
     let mut days: Vec<DayReport> = filtered_daily
@@ -101,7 +110,7 @@ pub fn print_full_report(
     } else {
         println!(
             "{}",
-            format!("💰 SUMA_NADGODZIN: {}", format_hm(total_hours))
+            format!("💰 SUMA_NADGODZIN OD {}-01-01: {}", today.year(), format_hm(total_hours))
                 .cyan()
                 .bold()
         );
@@ -117,7 +126,7 @@ pub fn print_full_report(
 
     if month_filter.is_none() {
         let current_month = format!("{}-{:02}", today.year(), today.month());
-        let current_month_hours: f64 = daily
+        let current_month_hours: f64 = filtered_daily
             .iter()
             .filter(|(d, _)| format!("{}-{:02}", d.year(), d.month()) == current_month)
             .map(|(_, h)| h)
@@ -135,10 +144,10 @@ pub fn print_full_report(
         );
         println!();
 
-        print_monthly_stats(daily);
+        print_monthly_stats(&filtered_daily);
         println!();
 
-        print_summary_stats(daily);
+        print_summary_stats(&filtered_daily);
         println!();
 
         println!("{}", "🔍 ŹRÓDŁA DANYCH:".cyan().bold());
