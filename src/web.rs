@@ -42,6 +42,7 @@ pub fn router() -> Router {
         .route("/api/rebuild", post(rebuild))
         .route("/api/shift", axum::routing::put(put_shift))
         .route("/api/projects", get(get_projects))
+        .route("/api/months", get(get_months))
         .route("/api/report/{file}", get(get_pdf))
         .with_state(AppState {
             config: Arc::new(std::sync::RwLock::new(config::load_config())),
@@ -172,6 +173,9 @@ struct MonthResponse {
     total_hours: f64,
     total_formatted: String,
     days_count: usize,
+    average_hours: f64,
+    average_formatted: String,
+    average_months: usize,
     rates: Rates,
 }
 
@@ -248,10 +252,14 @@ async fn get_month(
             date += Duration::days(1);
         }
         let total_hours = days.iter().map(|day| day.hours).sum();
+        let (average_hours, average_months) = month_average(&summary);
         Ok(Json(MonthResponse {
             days_count: days.iter().filter(|day| day.hours > 0.0).count(),
             total_hours,
             total_formatted: archive::format_hm(total_hours),
+            average_hours,
+            average_formatted: archive::format_hm(average_hours),
+            average_months,
             rates: Rates {
                 weekday_pln: config.overtime_rate_weekday(),
                 weekend_pln: config.overtime_rate_weekend(),
@@ -881,6 +889,74 @@ struct ProjectsResponse {
     total_hours: f64,
     total_formatted: String,
     earned_pln: f64,
+}
+
+#[derive(Serialize)]
+struct MonthsRow {
+    month: String,
+    hours: f64,
+    formatted: String,
+    current: bool,
+}
+
+#[derive(Serialize)]
+struct MonthsResponse {
+    months: Vec<MonthsRow>,
+    average_hours: f64,
+    average_formatted: String,
+    average_months: usize,
+    total_hours: f64,
+    total_formatted: String,
+}
+
+fn current_month() -> String {
+    let today = today();
+    format!("{}-{:02}", today.year(), today.month())
+}
+
+/// Średnia z zamkniętych miesięcy — bieżący jest niepełny i zaniżałby wynik.
+fn month_average(summary: &archive::DailySummaryFile) -> (f64, usize) {
+    let current = current_month();
+    let past: Vec<f64> = summary
+        .months
+        .iter()
+        .filter(|(key, _)| key.as_str() != current)
+        .map(|(_, month)| month.total_hours)
+        .collect();
+    if past.is_empty() {
+        (0.0, 0)
+    } else {
+        (past.iter().sum::<f64>() / past.len() as f64, past.len())
+    }
+}
+
+async fn get_months() -> Result<Json<MonthsResponse>, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let summary = archive::load_summary_checked().map_err(internal)?;
+        let current = current_month();
+        let months: Vec<MonthsRow> = summary
+            .months
+            .iter()
+            .map(|(key, month)| MonthsRow {
+                month: key.clone(),
+                hours: month.total_hours,
+                formatted: archive::format_hm(month.total_hours),
+                current: key.as_str() == current,
+            })
+            .collect();
+        let (average_hours, average_months) = month_average(&summary);
+        let total_hours: f64 = months.iter().map(|month| month.hours).sum();
+        Ok(Json(MonthsResponse {
+            months,
+            average_hours,
+            average_formatted: archive::format_hm(average_hours),
+            average_months,
+            total_hours,
+            total_formatted: archive::format_hm(total_hours),
+        }))
+    })
+    .await
+    .map_err(join_error)?
 }
 
 async fn get_projects(
