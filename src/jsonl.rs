@@ -164,6 +164,12 @@ pub fn load_daily_summary_full(config: &Config, debug: bool) -> DailySummaryData
             if let Some(projects) = day_data.projects {
                 let mut day_projects: HashMap<String, ProjectHours> = HashMap::new();
                 let mut recalculated_hours = 0.0;
+                // Suma wszystkich projektów dnia, przed filtrami — mianownik
+                // skalowania musi być identyczny jak w summary_projects() w web.rs.
+                let all_hours: f64 = projects
+                    .values()
+                    .map(|h| h.weekday_hours + h.weekend_hours)
+                    .sum();
                 for (proj_name, proj_hours) in projects {
                     if config.is_source_excluded(&proj_name) {
                         continue;
@@ -187,6 +193,20 @@ pub fn load_daily_summary_full(config: &Config, debug: bool) -> DailySummaryData
                     day_data.hours,
                     recalculated_hours,
                 );
+                // Manual day total overrides the computed one — scale project hours
+                // proportionally so per-project sums match the correction (same
+                // scaling as summary_projects() in web.rs).
+                let scale = if day_data.manual_override && all_hours > 0.0 {
+                    day_hours / all_hours
+                } else {
+                    1.0
+                };
+                if scale != 1.0 {
+                    for entry in day_projects.values_mut() {
+                        entry.weekday_hours *= scale;
+                        entry.weekend_hours *= scale;
+                    }
+                }
                 if day_hours > 0.0 {
                     result.hours.insert(date, day_hours);
                 }
