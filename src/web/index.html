@@ -55,18 +55,20 @@ const C={k:'#2a1c12',d:'#b06a22',o:'#e0952f',l:'#f5c163',w:'#f7efe2',e:'#12100e'
 const UW=32,UH=24,cv=$('#pet-cv'),pet=$('#pet');
 // jeden piksel liska = całkowita liczba fizycznych pikseli ekranu, a pozycja ląduje
 // na ich siatce — inaczej GPU interpoluje przy skalowaniu i lisek się smuży
-const DPR=devicePixelRatio||1,PS=Math.max(1,Math.round(3*DPR)),S=PS/DPR;
+// SIZE = ile jednostek siatki rysowania na piksel palety (wyżej = gładsze kontury)
+const SIZE=3,DPR=devicePixelRatio||1,PSF=Math.max(1,Math.round(DPR)),S=SIZE;
 const snap=v=>Math.round(v*DPR)/DPR;
-cv.width=UW*PS;cv.height=UH*PS;
-cv.style.width=UW*S+'px';cv.style.height=UH*S+'px';
-const cx=cv.getContext('2d');cx.imageSmoothingEnabled=false;
 // lisek powstaje wektorowo w siatce 1:1, potem trafia w paletę i dostaje kontur —
 // stąd pixelowy wygląd bez ręcznego układania pikseli
-const off=document.createElement('canvas');off.width=UW;off.height=UH;
-const og=off.getContext('2d');
+const off=document.createElement('canvas');off.width=UW*SIZE;off.height=UH*SIZE;
+const og=off.getContext('2d');og.scale(SIZE,SIZE);
+cv.width=off.width*PSF;cv.height=off.height*PSF;
+cv.style.width=cv.width/DPR+'px';cv.style.height=cv.height/DPR+'px';
+const cx=cv.getContext('2d');cx.imageSmoothingEnabled=false;
 const PAL=[[42,28,18],[176,106,34],[224,149,47],[245,193,99],[247,239,226],[18,16,14],[201,112,95]];
 function pixelize(){
-  const img=og.getImageData(0,0,UW,UH),d=img.data,solid=new Uint8Array(UW*UH);
+  const W=UW*SIZE,H=UH*SIZE;
+  const img=og.getImageData(0,0,W,H),d=img.data,solid=new Uint8Array(W*H);
   for(let i=0,px=0;i<d.length;i+=4,px++){
     if(d[i+3]<128){d[i+3]=0;continue}
     d[i+3]=255;solid[px]=1;
@@ -77,8 +79,8 @@ function pixelize(){
     }
     d[i]=PAL[bi][0];d[i+1]=PAL[bi][1];d[i+2]=PAL[bi][2];
   }
-  for(let y=0;y<UH;y++)for(let x=0;x<UW;x++){
-    const px=y*UW+x;
+  for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+    const px=y*W+x;
     if(solid[px])continue;
     if((x>0&&solid[px-1])||(x<UW-1&&solid[px+1])||(y>0&&solid[px-UW])||(y<UH-1&&solid[px+UW])){
       const i=px*4;d[i]=42;d[i+1]=28;d[i+2]=18;d[i+3]=255;
@@ -270,11 +272,8 @@ function step(){
   drawFox(og,P);
   og.restore();
   pixelize();
-  cx.clearRect(0,0,UW*PS,UH*PS);
-  const sh=Math.max(0,1-air/26);
-  cx.fillStyle='rgba(0,0,0,'+(.32*sh)+')';
-  cx.fillRect(Math.round(UW*PS/2-UW*PS*.26*sh),UH*PS-PS,Math.round(UW*PS*.52*sh),PS);
-  cx.drawImage(off,0,0,UW*PS,UH*PS);
+  cx.clearRect(0,0,cv.width,cv.height);
+  cx.drawImage(off,0,0,cv.width,cv.height);
   // pozycja przypięta do siatki fizycznych pikseli — na ułamkowej lisek rozmywa
   // się przy kompozytowaniu i ciągnie za sobą smugę
   pet.style.transform='translate('+snap(x)+'px,'+snap(-air)+'px)';
