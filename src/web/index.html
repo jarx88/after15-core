@@ -82,7 +82,7 @@ function pixelize(){
   for(let y=0;y<H;y++)for(let x=0;x<W;x++){
     const px=y*W+x;
     if(solid[px])continue;
-    if((x>0&&solid[px-1])||(x<UW-1&&solid[px+1])||(y>0&&solid[px-UW])||(y<UH-1&&solid[px+UW])){
+    if((x>0&&solid[px-1])||(x<W-1&&solid[px+1])||(y>0&&solid[px-W])||(y<H-1&&solid[px+W])){
       const i=px*4;d[i]=42;d[i+1]=28;d[i+2]=18;d[i+3]=255;
     }
   }
