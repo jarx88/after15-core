@@ -83,6 +83,7 @@ pub struct ProjectTotal {
     pub amount_pln: f64,
     /// Godziny dodatkowe z dni po przejsciu na B2B.
     pub b2b_hours: f64,
+    pub b2b_pln: f64,
 }
 
 pub fn calculate_project_totals(
@@ -114,14 +115,17 @@ pub fn calculate_project_totals(
                 last_seen: *date,
                 amount_pln: 0.0,
                 b2b_hours: 0.0,
+                b2b_pln: 0.0,
             });
             total.hours.weekday_hours += hours.weekday_hours;
             total.hours.weekend_hours += hours.weekend_hours;
             total.hours.regular_hours += hours.regular_hours;
             let extra = hours.weekday_hours + hours.weekend_hours;
-            total.amount_pln += extra * config.day_rate(*date);
+            let pln = extra * config.day_rate(*date);
+            total.amount_pln += pln;
             if config.is_b2b(*date) {
                 total.b2b_hours += extra;
+                total.b2b_pln += pln;
             }
             total.first_seen = total.first_seen.min(*date);
             total.last_seen = total.last_seen.max(*date);

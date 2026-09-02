@@ -68,6 +68,11 @@ async fn web_contract_and_mutations_are_isolated() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(projects["total_formatted"], "2:00");
     assert!(!projects.to_string().contains("zeszloroczny"));
+    // Rozbicie etat/B2B: bez b2b_from wszystko jest etatowymi nadgodzinami.
+    assert_eq!(projects["overtime_hours"], 2.0);
+    assert_eq!(projects["b2b_hours"], 0.0);
+    assert_eq!(projects["overtime_pln"], projects["earned_pln"]);
+    assert_eq!(projects["projects"][0]["b2b_pln"], 0.0);
 
     for uri in ["/api/month/2026-13", "/api/day/2026-02-30", "/api/report/nope.pdf"] {
         assert_eq!(request(&app, "GET", uri, None).await.0, StatusCode::BAD_REQUEST);

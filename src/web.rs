@@ -987,6 +987,11 @@ struct ProjectResponseRow {
     formatted: String,
     share_pct: f64,
     pln: f64,
+    // Rozbicie: etatowe nadgodziny (do cutoveru) vs B2B (od cutoveru), godziny i PLN.
+    overtime_hours: f64,
+    overtime_pln: f64,
+    b2b_hours: f64,
+    b2b_pln: f64,
 }
 
 #[derive(Serialize)]
@@ -996,6 +1001,10 @@ struct ProjectsResponse {
     total_hours: f64,
     total_formatted: String,
     earned_pln: f64,
+    overtime_hours: f64,
+    overtime_pln: f64,
+    b2b_hours: f64,
+    b2b_pln: f64,
 }
 
 #[derive(Serialize)]
@@ -1094,30 +1103,55 @@ async fn get_projects(
                     + if full { project.hours.regular_hours } else { 0.0 };
                 // amount_pln jest liczone per dzien stawka tego dnia (B2B vs nadgodziny),
                 // mnozenie sum miesiecznych przez jedna stawke zawyzaloby/zanizalo wrzesien 2026
-                (project.name, hours, project.amount_pln)
+                let extra = project.hours.weekday_hours + project.hours.weekend_hours;
+                (
+                    project.name,
+                    hours,
+                    project.amount_pln,
+                    extra - project.b2b_hours,
+                    project.amount_pln - project.b2b_pln,
+                    project.b2b_hours,
+                    project.b2b_pln,
+                )
             })
             .collect();
-        let total_hours: f64 = values.iter().map(|(_, hours, _)| hours).sum();
-        let earned_pln: f64 = values.iter().map(|(_, _, pln)| pln).sum();
+        let total_hours: f64 = values.iter().map(|v| v.1).sum();
+        let earned_pln: f64 = values.iter().map(|v| v.2).sum();
+        let overtime_hours: f64 = values.iter().map(|v| v.3).sum();
+        let overtime_pln: f64 = values.iter().map(|v| v.4).sum();
+        let b2b_hours: f64 = values.iter().map(|v| v.5).sum();
+        let b2b_pln: f64 = values.iter().map(|v| v.6).sum();
         Ok(Json(ProjectsResponse {
             mode,
             projects: values
                 .into_iter()
-                .map(|(name, hours, pln)| ProjectResponseRow {
-                    name,
-                    hours,
-                    formatted: archive::format_hm(hours),
-                    share_pct: if total_hours == 0.0 {
-                        0.0
-                    } else {
-                        hours / total_hours * 100.0
+                .map(
+                    |(name, hours, pln, overtime_hours, overtime_pln, b2b_hours, b2b_pln)| {
+                        ProjectResponseRow {
+                            name,
+                            hours,
+                            formatted: archive::format_hm(hours),
+                            share_pct: if total_hours == 0.0 {
+                                0.0
+                            } else {
+                                hours / total_hours * 100.0
+                            },
+                            pln,
+                            overtime_hours,
+                            overtime_pln,
+                            b2b_hours,
+                            b2b_pln,
+                        }
                     },
-                    pln,
-                })
+                )
                 .collect(),
             total_hours,
             total_formatted: archive::format_hm(total_hours),
             earned_pln,
+            overtime_hours,
+            overtime_pln,
+            b2b_hours,
+            b2b_pln,
         }))
     })
     .await
