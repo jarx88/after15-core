@@ -8,13 +8,15 @@ use tabled::{
 
 use crate::config::Config;
 use crate::jsonl::ProjectHours;
-use crate::schedule::{get_shift_type, ShiftType};
+use crate::schedule::ShiftType;
 
 #[derive(Clone)]
 pub struct DayReport {
     pub date: NaiveDate,
     pub hours: f64,
     pub shift_type: ShiftType,
+    /// Gotowy opis zmiany z oknem pracy, np. "Normalny (<6 >15)" albo "B2B (<7 >15)".
+    pub shift_desc: String,
     pub from_daily_summary: bool,
     pub projects: Vec<(String, f64)>,
 }
@@ -80,7 +82,8 @@ pub fn print_full_report(
             DayReport {
                 date: *date,
                 hours: *hours,
-                shift_type: get_shift_type(*date),
+                shift_type: config.effective_shift(*date),
+                shift_desc: shift_desc(*date, config),
                 from_daily_summary: *date != today,
                 projects: day_projects,
             }
@@ -171,11 +174,7 @@ fn print_daily_table(days: &[DayReport]) {
             let date_str = format!("{} {} {}", emoji, d.date, source);
 
             let hours_str = format_hm(d.hours);
-            let shift_str = format!(
-                "{} ({})",
-                shift_type_name(&d.shift_type),
-                overtime_window_short(&d.shift_type)
-            );
+            let shift_str = d.shift_desc.clone();
 
             let projects_str = if d.projects.is_empty() {
                 "—".to_string()
@@ -263,8 +262,11 @@ fn print_project_tables(
     config: &Config,
     month_filter: Option<&str>,
 ) {
-    let mut monthly_projects: HashMap<String, HashMap<String, ProjectHours>> = HashMap::new();
+    // Wartosc: godziny plus kwota netto, liczona dniami stawka z `config.day_rate`.
+    let mut monthly_projects: HashMap<String, HashMap<String, (ProjectHours, f64)>> =
+        HashMap::new();
     let mut monthly_totals: HashMap<String, f64> = HashMap::new();
+    let mut monthly_b2b: HashMap<String, bool> = HashMap::new();
 
     for (date, day_projects) in projects {
         let month_key = format!("{}-{:02}", date.year(), date.month());
@@ -278,20 +280,21 @@ fn print_project_tables(
             }
 
             let proj_entry = month_entry.entry(normalized).or_default();
-            proj_entry.weekday_hours += hours.weekday_hours;
-            proj_entry.weekend_hours += hours.weekend_hours;
+            proj_entry.0.weekday_hours += hours.weekday_hours;
+            proj_entry.0.weekend_hours += hours.weekend_hours;
 
             let total_hours = hours.weekday_hours + hours.weekend_hours;
+            proj_entry.1 += total_hours * config.day_rate(*date);
             *monthly_totals.entry(month_key.clone()).or_insert(0.0) += total_hours;
+            if config.is_b2b(*date) {
+                monthly_b2b.insert(month_key.clone(), true);
+            }
         }
     }
 
     let mut months: Vec<_> = monthly_projects.keys().cloned().collect();
     months.sort();
     months.reverse();
-
-    let hourly_weekday = config.overtime_rate_weekday();
-    let hourly_weekend = config.overtime_rate_weekend();
 
     let months_to_show = if month_filter.is_some() { 1 } else { 3 };
     for month in months.iter().take(months_to_show) {
@@ -325,11 +328,10 @@ fn print_project_tables(
 
             let mut rows: Vec<ProjectRow> = month_projects
                 .iter()
-                .filter(|(_, hours)| hours.weekday_hours + hours.weekend_hours > 0.001)
-                .map(|(name, hours)| {
+                .filter(|(_, (hours, _))| hours.weekday_hours + hours.weekend_hours > 0.001)
+                .map(|(name, (hours, pln))| {
                     let total_h = hours.weekday_hours + hours.weekend_hours;
-                    let pln = (hours.weekday_hours * hourly_weekday)
-                        + (hours.weekend_hours * hourly_weekend);
+                    let pln = *pln;
 
                     ProjectRow {
                         project: name.clone(),
@@ -350,15 +352,19 @@ fn print_project_tables(
 
             println!("{}", table);
 
-            let total_pln: f64 = month_projects
-                .values()
-                .map(|h| (h.weekday_hours * hourly_weekday) + (h.weekend_hours * hourly_weekend))
-                .sum();
+            let total_pln: f64 = month_projects.values().map(|(_, pln)| pln).sum();
 
-            println!(
-                "  💰 Wynagrodzenie: {:.0} PLN netto ({:.0} PLN/h dzień, {:.0} PLN/h weekend)",
-                total_pln, hourly_weekday, hourly_weekend
-            );
+            if monthly_b2b.get(month).copied().unwrap_or(false) {
+                // Miesiac zawiera dni B2B, wiec jedna stawka w stopce bylaby mylaca.
+                println!("  💰 Wynagrodzenie: {:.0} PLN netto", total_pln);
+            } else {
+                println!(
+                    "  💰 Wynagrodzenie: {:.0} PLN netto ({:.0} PLN/h dzień, {:.0} PLN/h weekend)",
+                    total_pln,
+                    config.overtime_rate_weekday(),
+                    config.overtime_rate_weekend()
+                );
+            }
             println!();
         }
     }
@@ -420,13 +426,22 @@ fn shift_type_name(shift_type: &ShiftType) -> String {
     }
 }
 
-fn overtime_window_short(shift_type: &ShiftType) -> &'static str {
-    match shift_type {
-        ShiftType::Weekend => "cały dzień",
-        ShiftType::SaturdayAfternoon => "<8 >14",
-        ShiftType::Afternoon => "<15 >21",
-        ShiftType::Regular => "<6 >15",
-    }
+/// Nazwa zmiany plus okno pracy wzięte z configu (uwzględnia B2B i nadpisania).
+fn shift_desc(date: NaiveDate, config: &Config) -> String {
+    let name = if config.is_b2b(date) {
+        "B2B".to_string()
+    } else {
+        shift_type_name(&config.effective_shift(date))
+    };
+    let window = match config.effective_work_window(date) {
+        Some(w) => format!(
+            "<{} >{}",
+            w.start.format("%-H").to_string(),
+            w.end.format("%-H").to_string()
+        ),
+        None => "cały dzień".to_string(),
+    };
+    format!("{} ({})", name, window)
 }
 
 pub fn format_hm(hours: f64) -> String {
@@ -439,6 +454,30 @@ pub fn format_hm(hours: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shift_desc_matches_old_labels_and_b2b() {
+        let cfg = Config::default();
+        assert_eq!(
+            shift_desc(NaiveDate::from_ymd_opt(2025, 8, 4).unwrap(), &cfg),
+            "Normalny (<6 >15)"
+        );
+        let b2b = Config {
+            billing: crate::config::BillingConfig {
+                b2b_from: Some(NaiveDate::from_ymd_opt(2026, 9, 2).unwrap()),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        assert_eq!(
+            shift_desc(NaiveDate::from_ymd_opt(2026, 9, 3).unwrap(), &b2b),
+            "B2B (<7 >15)"
+        );
+        assert_eq!(
+            shift_desc(NaiveDate::from_ymd_opt(2026, 9, 5).unwrap(), &b2b),
+            "B2B (cały dzień)"
+        );
+    }
 
     #[test]
     fn claude_worktree_sessions_collapse_into_main_project() {

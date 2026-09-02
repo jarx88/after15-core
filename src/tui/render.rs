@@ -61,7 +61,7 @@ pub fn draw(f: &mut Frame, st: &EditState) {
         Row::new(vec![
             Cell::from(r.date.format("%Y-%m-%d").to_string()),
             Cell::from(hours_cell),
-            Cell::from(r.shift.clone()),
+            Cell::from(crate::tui::state::shift_display(&r.shift).to_string()),
             Cell::from(flag),
         ])
         .style(style)

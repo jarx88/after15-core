@@ -105,7 +105,7 @@ fn main() {
                         daily_projects.insert(date, projects);
                     }
                 }
-                archive::archive_overtime(&daily_hours, &daily_projects, false);
+                archive::archive_overtime(&daily_hours, &daily_projects, &config, false);
                 auto_telegram_backup(&config);
                 mark_daily_archive_done();
             }
@@ -158,7 +158,7 @@ fn main() {
         }
     }
 
-    archive::archive_overtime(&daily_hours, &daily_projects, cli.debug);
+    archive::archive_overtime(&daily_hours, &daily_projects, &config, cli.debug);
 
     if cli.project_totals {
         print_project_totals(&daily_projects, &config, cli.full);
@@ -206,11 +206,6 @@ fn print_project_totals(
     full: bool,
 ) {
     use colored::*;
-
-    let hourly_weekday = config.salary.base_monthly_net / config.salary.hours_per_month
-        * config.salary.overtime_multiplier_weekday;
-    let hourly_weekend = config.salary.base_monthly_net / config.salary.hours_per_month
-        * config.salary.overtime_multiplier_weekend;
 
     let totals = after15::calculate_project_totals(daily_projects, config, full);
 
@@ -268,7 +263,7 @@ fn print_project_totals(
         let wk_h = hours.weekend_hours;
         let reg_h = hours.regular_hours;
         let overtime_sum = day_h + wk_h;
-        let pln = day_h * hourly_weekday + wk_h * hourly_weekend;
+        let pln = project.amount_pln;
         total_weekday += day_h;
         total_weekend += wk_h;
         total_regular += reg_h;
@@ -351,7 +346,7 @@ fn print_statusline(daily: &HashMap<chrono::NaiveDate, f64>, config: &config::Co
         .sum();
 
     let now = Local::now();
-    let icon = if schedule::is_overtime_hour(now, config.work_window_override(today)) {
+    let icon = if schedule::is_overtime_hour(now, config.effective_work_window(today)) {
         "🌙"
     } else {
         "🏢"
@@ -372,16 +367,19 @@ fn print_explain(date: chrono::NaiveDate, debug: bool) {
     let cfg = config::load_config();
     let tracked_path = &cfg.projects.tracked_path;
 
-    let shift_type = schedule::get_shift_type(date);
-    let shift_name = match shift_type {
-        schedule::ShiftType::Regular => "REGULARNA",
-        schedule::ShiftType::Afternoon => "POPOŁUDNIOWA",
-        schedule::ShiftType::Weekend => "WEEKEND",
-        schedule::ShiftType::SaturdayAfternoon => "SOBOTA (zmiana popołudniowa)",
+    let shift_name = if cfg.is_b2b(date) {
+        "B2B"
+    } else {
+        match cfg.effective_shift(date) {
+            schedule::ShiftType::Regular => "REGULARNA",
+            schedule::ShiftType::Afternoon => "POPOŁUDNIOWA",
+            schedule::ShiftType::Weekend => "WEEKEND",
+            schedule::ShiftType::SaturdayAfternoon => "SOBOTA (zmiana popołudniowa)",
+        }
     };
 
     let override_window = cfg.work_window_override(date);
-    let window = override_window.or_else(|| schedule::get_regular_work_window(date));
+    let window = cfg.effective_work_window(date);
     let window_desc = match &window {
         Some(w) => format!(
             "{}:00-{}:00 = regularne, reszta = nadgodziny",
@@ -774,33 +772,12 @@ fn build_telegram_month_table(
             }
         };
 
-    let tracked_path = &config.projects.tracked_path;
-    let hourly_weekday = config.salary.base_monthly_net / config.salary.hours_per_month
-        * config.salary.overtime_multiplier_weekday;
-    let hourly_weekend = config.salary.base_monthly_net / config.salary.hours_per_month
-        * config.salary.overtime_multiplier_weekend;
-
-    let mut totals: HashMap<String, jsonl::ProjectHours> = HashMap::new();
-    for date in &filtered_dates {
-        if let Some(day_projects) = daily_projects.get(date) {
-            for (proj_name, hours) in day_projects {
-                let normalized = report::normalize_project_name(proj_name, tracked_path);
-                if config.projects.excluded_projects.contains(&normalized) {
-                    continue;
-                }
-                let entry = totals.entry(normalized).or_default();
-                entry.weekday_hours += hours.weekday_hours;
-                entry.weekend_hours += hours.weekend_hours;
-            }
-        }
-    }
-
-    let mut sorted: Vec<_> = totals.iter().collect();
-    sorted.sort_by(|a, b| {
-        let total_a = a.1.weekday_hours + a.1.weekend_hours;
-        let total_b = b.1.weekday_hours + b.1.weekend_hours;
-        total_b.partial_cmp(&total_a).unwrap()
-    });
+    let month_projects: HashMap<chrono::NaiveDate, HashMap<String, jsonl::ProjectHours>> =
+        filtered_dates
+            .iter()
+            .filter_map(|d| daily_projects.get(d).map(|p| (*d, p.clone())))
+            .collect();
+    let sorted = after15::calculate_project_totals(&month_projects, config, false);
 
     let mut rows: Vec<String> = Vec::new();
     rows.push(format!(
@@ -812,19 +789,19 @@ fn build_telegram_month_table(
     let mut total_hours = 0.0;
     let mut total_pln = 0.0;
 
-    for (name, hours) in sorted.iter().take(10) {
-        let day_h = hours.weekday_hours;
-        let wk_h = hours.weekend_hours;
+    for project in sorted.iter().take(10) {
+        let day_h = project.hours.weekday_hours;
+        let wk_h = project.hours.weekend_hours;
         let sum = day_h + wk_h;
         if sum < 0.01 {
             continue;
         }
-        let pln = day_h * hourly_weekday + wk_h * hourly_weekend;
+        let pln = project.amount_pln;
         total_hours += sum;
         total_pln += pln;
         rows.push(format!(
             "{:20} {:>5} {:>5} {:>5} {:>6}",
-            truncate_str(name, 20),
+            truncate_str(&project.name, 20),
             report::format_hm(day_h),
             report::format_hm(wk_h),
             report::format_hm(sum),

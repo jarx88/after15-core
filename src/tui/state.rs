@@ -3,7 +3,7 @@
 use chrono::NaiveDate;
 use std::collections::HashSet;
 use crate::archive::{format_hm, DailySummaryFile, DayEntry};
-use crate::schedule;
+use crate::config::Config;
 
 #[derive(Clone)]
 pub struct DayRow {
@@ -22,7 +22,7 @@ pub fn days_in_month(year: i32, month: u32) -> u32 {
     first_next.signed_duration_since(first_this).num_days() as u32
 }
 
-pub fn build_rows(summary: &DailySummaryFile, year: i32, month: u32) -> Vec<DayRow> {
+pub fn build_rows(summary: &DailySummaryFile, year: i32, month: u32, config: &Config) -> Vec<DayRow> {
     let n = days_in_month(year, month);
     let mut rows = Vec::with_capacity(n as usize);
     for d in 1..=n {
@@ -41,7 +41,7 @@ pub fn build_rows(summary: &DailySummaryFile, year: i32, month: u32) -> Vec<DayR
             rows.push(DayRow {
                 date,
                 hours: 0.0,
-                shift: schedule::shift_str(schedule::get_shift_type(date)).to_string(),
+                shift: config.shift_label(date),
                 manual_override: false,
                 existed: false,
                 dirty: false,
@@ -61,11 +61,12 @@ pub struct EditState {
     pub status: String,
     pub dirty: bool,
     pub edited: HashSet<String>,
+    pub config: Config,
 }
 
 impl EditState {
-    pub fn new(summary: DailySummaryFile, year: i32, month: u32) -> Self {
-        let rows = build_rows(&summary, year, month);
+    pub fn new(summary: DailySummaryFile, year: i32, month: u32, config: Config) -> Self {
+        let rows = build_rows(&summary, year, month, &config);
         EditState {
             summary,
             year,
@@ -76,11 +77,12 @@ impl EditState {
             status: String::new(),
             dirty: false,
             edited: HashSet::new(),
+            config,
         }
     }
 
     fn reload_rows(&mut self) {
-        self.rows = build_rows(&self.summary, self.year, self.month);
+        self.rows = build_rows(&self.summary, self.year, self.month, &self.config);
         if self.cursor >= self.rows.len() {
             self.cursor = self.rows.len().saturating_sub(1);
         }
@@ -231,6 +233,15 @@ impl EditState {
     }
 }
 
+/// Etykieta zmiany do wyswietlenia; w archiwum zostaje mala litera "b2b".
+pub fn shift_display(shift: &str) -> &str {
+    if shift == crate::config::B2B_SHIFT_LABEL {
+        "B2B"
+    } else {
+        shift
+    }
+}
+
 /// Parsuje godziny z formatu "H:MM" lub ułamka dziesiętnego ("2.5").
 /// Zwraca wartość zaokrągloną do 2 miejsc, w zakresie 0..=24.
 pub fn parse_hours(input: &str) -> Result<f64, String> {
@@ -277,7 +288,7 @@ mod tests {
     fn build_rows_marks_existing_and_virtual() {
         let mut s = DailySummaryFile::default();
         s.days.insert("2026-05-02".to_string(), day(2.0, "afternoon", true));
-        let rows = build_rows(&s, 2026, 5);
+        let rows = build_rows(&s, 2026, 5, &Config::default());
         assert_eq!(rows.len(), 31);
         let r2 = &rows[1]; // 2 maja
         assert!(r2.existed);
@@ -320,7 +331,7 @@ mod tests {
     #[test]
     fn new_starts_on_first_day() {
         let s = DailySummaryFile::default();
-        let st = EditState::new(s, 2026, 5);
+        let st = EditState::new(s, 2026, 5, Config::default());
         assert_eq!(st.cursor, 0);
         assert_eq!(st.rows.len(), 31);
         assert!(!st.dirty);
@@ -328,7 +339,7 @@ mod tests {
 
     #[test]
     fn navigation_clamps() {
-        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5);
+        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5, Config::default());
         st.move_up(); // już na 0 — bez zmian
         assert_eq!(st.cursor, 0);
         for _ in 0..100 { st.move_down(); }
@@ -337,7 +348,7 @@ mod tests {
 
     #[test]
     fn month_switch_rebuilds_rows_and_resets_cursor() {
-        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5);
+        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5, Config::default());
         st.cursor = 10;
         st.prev_month();
         assert_eq!(st.year, 2026);
@@ -351,7 +362,7 @@ mod tests {
 
     #[test]
     fn month_switch_wraps_year() {
-        let mut st = EditState::new(DailySummaryFile::default(), 2026, 12);
+        let mut st = EditState::new(DailySummaryFile::default(), 2026, 12, Config::default());
         st.next_month();
         assert_eq!((st.year, st.month), (2027, 1));
         st.prev_month();
@@ -361,7 +372,7 @@ mod tests {
 
     #[test]
     fn commit_edit_sets_hours_and_manual_flag() {
-        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5);
+        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5, Config::default());
         st.cursor = 0; // 1 maja, wirtualny
         st.begin_edit();
         assert!(st.editing.is_some());
@@ -383,7 +394,7 @@ mod tests {
 
     #[test]
     fn commit_edit_rejects_invalid_keeps_editing() {
-        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5);
+        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5, Config::default());
         st.begin_edit();
         // begin_edit prefilluje "0:00" — wyczyść i wpisz złą wartość
         st.editing = Some(String::new());
@@ -396,7 +407,7 @@ mod tests {
 
     #[test]
     fn cancel_edit_discards() {
-        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5);
+        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5, Config::default());
         st.begin_edit();
         st.input_char('5');
         st.cancel_edit();
@@ -411,7 +422,7 @@ mod tests {
         let mut proj = std::collections::BTreeMap::new();
         proj.insert("farmaster".to_string(), crate::archive::ProjectHoursEntry::default());
         s.days.insert("2026-05-03".to_string(), DayEntry { hours: 1.0, formatted: "1:00".into(), shift: "regular".into(), processed: true, manual_override: false, projects: Some(proj), ..Default::default() });
-        let mut st = EditState::new(s, 2026, 5);
+        let mut st = EditState::new(s, 2026, 5, Config::default());
         st.cursor = 2; // 3 maja
         st.begin_edit();
         st.editing = Some(String::new());
@@ -426,7 +437,7 @@ mod tests {
     fn toggle_manual_on_existing_day() {
         let mut s = DailySummaryFile::default();
         s.days.insert("2026-05-04".to_string(), DayEntry { hours: 2.0, formatted: "2:00".into(), shift: "regular".into(), processed: true, manual_override: false, projects: None, ..Default::default() });
-        let mut st = EditState::new(s, 2026, 5);
+        let mut st = EditState::new(s, 2026, 5, Config::default());
         st.cursor = 3;
         st.toggle_manual();
         assert!(st.rows[3].manual_override);
@@ -439,7 +450,7 @@ mod tests {
 
     #[test]
     fn toggle_manual_on_virtual_day_creates_entry() {
-        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5);
+        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5, Config::default());
         st.cursor = 0; // wirtualny
         st.toggle_manual();
         assert!(st.rows[0].manual_override);
@@ -450,7 +461,7 @@ mod tests {
 
     #[test]
     fn apply_edits_recalcs_months() {
-        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5);
+        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5, Config::default());
         st.begin_edit();
         st.editing = Some(String::new());
         for c in "4:00".chars() { st.input_char(c); }
@@ -470,7 +481,7 @@ mod tests {
             processed: true,
             manual_override: false,
             projects: None, ..Default::default() });
-        let mut st = EditState::new(s, 2026, 5);
+        let mut st = EditState::new(s, 2026, 5, Config::default());
         st.cursor = 4; // 5 maja (index 4)
         st.begin_edit();
         st.editing = Some(String::new());
@@ -491,7 +502,7 @@ mod tests {
 
     #[test]
     fn apply_edits_merges_onto_concurrent_state() {
-        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5);
+        let mut st = EditState::new(DailySummaryFile::default(), 2026, 5, Config::default());
         st.cursor = 0; // 1 maja
         st.begin_edit();
         st.editing = Some(String::new());

@@ -4,7 +4,6 @@ use std::collections::HashMap;
 
 use crate::config::Config;
 use crate::jsonl::Session;
-use crate::schedule::{get_shift_type, ShiftType};
 
 pub fn calculate_session_overtime(
     session: &Session,
@@ -144,12 +143,8 @@ fn calculate_overtime_for_day(
 
         overtime_secs
     } else {
-        match get_shift_type(date) {
-            ShiftType::Weekend => (end - start).num_seconds() as f64,
-            ShiftType::Regular | ShiftType::Afternoon | ShiftType::SaturdayAfternoon => {
-                (end - start).num_seconds() as f64
-            }
-        }
+        // Brak okna pracy (weekend, B2B weekend) = caly czas to godziny dodatkowe.
+        (end - start).num_seconds() as f64
     }
 }
 
@@ -240,6 +235,63 @@ mod tests {
 
         let overtime = calculate_overtime_for_day(date, start, end, &Config::default());
         assert_eq!(overtime, 4.0 * 3600.0);
+    }
+
+    fn b2b_config() -> Config {
+        Config {
+            billing: crate::config::BillingConfig {
+                b2b_from: Some(NaiveDate::from_ymd_opt(2026, 9, 2).unwrap()),
+                ..Default::default()
+            },
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn b2b_weekday_counts_hours_outside_07_15() {
+        let date = NaiveDate::from_ymd_opt(2026, 9, 3).unwrap(); // czwartek
+        let start = NaiveTime::from_hms_opt(5, 30, 0).unwrap();
+        let end = NaiveTime::from_hms_opt(16, 30, 0).unwrap();
+        let cfg = b2b_config();
+        assert_eq!(
+            calculate_overtime_for_day(date, start, end, &cfg),
+            3.0 * 3600.0
+        );
+        assert_eq!(
+            calculate_regular_for_day(date, start, end, &cfg),
+            8.0 * 3600.0
+        );
+    }
+
+    #[test]
+    fn b2b_weekend_is_all_extra() {
+        let date = NaiveDate::from_ymd_opt(2026, 9, 5).unwrap(); // sobota
+        let start = NaiveTime::from_hms_opt(10, 0, 0).unwrap();
+        let end = NaiveTime::from_hms_opt(12, 0, 0).unwrap();
+        let cfg = b2b_config();
+        assert_eq!(
+            calculate_overtime_for_day(date, start, end, &cfg),
+            2.0 * 3600.0
+        );
+        assert_eq!(calculate_regular_for_day(date, start, end, &cfg), 0.0);
+    }
+
+    #[test]
+    fn before_cutover_keeps_old_shift_logic() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 27).unwrap();
+        let start = NaiveTime::from_hms_opt(5, 30, 0).unwrap();
+        let end = NaiveTime::from_hms_opt(16, 30, 0).unwrap();
+        let cfg = b2b_config();
+        assert!(!cfg.is_b2b(date));
+        let expected = match crate::schedule::get_shift_type(date) {
+            // regularna 06-15: 0:30 przed + 1:30 po
+            crate::schedule::ShiftType::Regular => 2.0 * 3600.0,
+            // popoludniowa 15-21: cale 5:30 przed oknem
+            crate::schedule::ShiftType::Afternoon => 9.5 * 3600.0,
+            other => panic!("nieoczekiwana zmiana w dzien roboczy: {:?}", other),
+        };
+        assert_eq!(calculate_overtime_for_day(date, start, end, &cfg), expected);
+        assert_ne!(calculate_overtime_for_day(date, start, end, &cfg), 3.0 * 3600.0);
     }
 
     #[test]

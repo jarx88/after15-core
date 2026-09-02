@@ -110,10 +110,6 @@ pub fn shift_from_str(value: &str) -> Option<ShiftType> {
     }
 }
 
-pub fn get_regular_work_window(date: NaiveDate) -> Option<WorkWindow> {
-    window_for_shift(get_shift_type(date))
-}
-
 pub fn window_for_shift(shift: ShiftType) -> Option<WorkWindow> {
     match shift {
         ShiftType::Regular => Some(WorkWindow {
@@ -132,11 +128,11 @@ pub fn window_for_shift(shift: ShiftType) -> Option<WorkWindow> {
     }
 }
 
-pub fn is_overtime_hour(dt: DateTime<Local>, work_window_override: Option<WorkWindow>) -> bool {
-    let date = dt.date_naive();
+/// `work_window` musi pochodzic z `Config::effective_work_window` (zna B2B i nadpisania).
+/// `None` = caly dzien jest rozliczalny.
+pub fn is_overtime_hour(dt: DateTime<Local>, work_window: Option<WorkWindow>) -> bool {
     let time = dt.time();
-
-    match work_window_override.or_else(|| get_regular_work_window(date)) {
+    match work_window {
         Some(window) => time < window.start || time >= window.end,
         None => true,
     }
@@ -234,6 +230,28 @@ mod tests {
         let sat = NaiveDate::from_ymd_opt(2025, 8, 2).unwrap();
         assert!(is_saturday_regular_hours(sat));
         assert_eq!(get_shift_type(sat), ShiftType::SaturdayAfternoon);
+    }
+
+    #[test]
+    fn statusline_overtime_follows_b2b_window() {
+        use chrono::TimeZone;
+        let cfg = crate::config::Config {
+            billing: crate::config::BillingConfig {
+                b2b_from: Some(NaiveDate::from_ymd_opt(2026, 9, 2).unwrap()),
+                ..Default::default()
+            },
+            ..crate::config::Config::default()
+        };
+        let at = |y, m, d, h, min| Local.with_ymd_and_hms(y, m, d, h, min, 0).unwrap();
+        let check = |dt: chrono::DateTime<Local>| {
+            is_overtime_hour(dt, cfg.effective_work_window(dt.date_naive()))
+        };
+        // czwartek B2B: przed 07:00 i po 15:00 to nadgodziny, w srodku nie
+        assert!(check(at(2026, 9, 3, 6, 30)));
+        assert!(!check(at(2026, 9, 3, 8, 0)));
+        assert!(check(at(2026, 9, 3, 15, 30)));
+        // sobota B2B w okresie popoludniowym starego cyklu: caly dzien rozliczalny
+        assert!(check(at(2026, 9, 19, 10, 0)));
     }
 
     #[test]

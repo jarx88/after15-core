@@ -43,6 +43,11 @@ pub fn router() -> Router {
         .route("/api/shift", axum::routing::put(put_shift))
         .route("/api/projects", get(get_projects))
         .route("/api/report/{file}", get(get_pdf))
+        .route("/api/invoice/{month}", get(get_invoice))
+        .route(
+            "/api/invoice/{month}/summaries",
+            get(get_invoice_summaries).post(post_invoice_summaries),
+        )
         .with_state(AppState {
             config: Arc::new(std::sync::RwLock::new(config::load_config())),
             mutation: Arc::new(Mutex::new(())),
@@ -143,6 +148,8 @@ struct MonthProject {
     weekday_hours: f64,
     weekend_hours: f64,
     regular_hours: f64,
+    /// Kwota netto za dodatkowe godziny tego projektu w tym dniu (stawka dnia).
+    pln: f64,
 }
 
 #[derive(Serialize)]
@@ -156,6 +163,8 @@ struct MonthDay {
     has_note: bool,
     has_summary: bool,
     source: String,
+    /// Kwota netto za dodatkowe godziny dnia: godziny x `config.day_rate(date)`.
+    pln: f64,
     projects: Vec<MonthProject>,
 }
 
@@ -163,6 +172,7 @@ struct MonthDay {
 struct Rates {
     weekday_pln: f64,
     weekend_pln: f64,
+    b2b_pln: f64,
 }
 
 #[derive(Serialize)]
@@ -172,21 +182,81 @@ struct MonthResponse {
     total_formatted: String,
     days_count: usize,
     rates: Rates,
+    total_pln: f64,
+    /// Data przejscia na B2B (ISO) albo null.
+    b2b_from: Option<String>,
+}
+
+/// Nazwa kubelka na godziny dnia, ktorych nie da sie przypisac do projektu:
+/// reczne korekty i dni sprzed sledzenia projektow.
+pub const UNASSIGNED: &str = "bez przypisania";
+
+/// Godziny dnia poza projektami — dzieki temu suma po projektach = suma dnia.
+fn unassigned_hours(hours: f64, projects: &HashMap<String, jsonl::ProjectHours>) -> f64 {
+    let attributed: f64 = projects
+        .values()
+        .map(|entry| entry.weekday_hours + entry.weekend_hours)
+        .sum();
+    (hours - attributed).max(0.0)
+}
+
+/// Godziny i projekty kazdego dnia miesiaca tak, jak widzi je widok miesiaca:
+/// archiwum, a dla dzisiaj (bez recznej korekty) swieze wyliczenie z jsonl.
+fn month_day_data(
+    summary: &archive::DailySummaryFile,
+    first: NaiveDate,
+    config: &config::Config,
+) -> Vec<(NaiveDate, f64, HashMap<String, jsonl::ProjectHours>)> {
+    let archived = summary_projects(summary);
+    let live = (first.year() == today().year() && first.month() == today().month())
+        .then(|| cached_compute_day(today(), config));
+    let mut days = Vec::new();
+    let mut date = first;
+    while date.month() == first.month() {
+        let stored = summary.days.get(&date.to_string());
+        let use_live = date == today() && !stored.is_some_and(|day| day.manual_override);
+        let (hours, projects) = match (use_live, live.as_ref()) {
+            (true, Some(live)) => (live.hours, live.projects.clone()),
+            _ => (
+                stored.map(|day| day.hours).unwrap_or(0.0),
+                archived.get(&date).cloned().unwrap_or_default(),
+            ),
+        };
+        days.push((date, hours, projects));
+        date += Duration::days(1);
+    }
+    days
 }
 
 fn month_project_rows(
-    projects: Option<&HashMap<String, jsonl::ProjectHours>>,
+    projects: &HashMap<String, jsonl::ProjectHours>,
+    hours: f64,
+    rate: f64,
+    weekend: bool,
+    b2b: bool,
 ) -> Vec<MonthProject> {
     let mut rows: Vec<_> = projects
-        .into_iter()
-        .flat_map(|projects| projects.iter())
+        .iter()
         .map(|(name, hours)| MonthProject {
             name: name.clone(),
             weekday_hours: hours.weekday_hours,
             weekend_hours: hours.weekend_hours,
             regular_hours: hours.regular_hours,
+            pln: (hours.weekday_hours + hours.weekend_hours) * rate,
         })
         .collect();
+    // Tylko dni B2B — na starszych miesiacach kubelek zmienilby widok i kwoty,
+    // a faktura i tak liczy wylacznie dni B2B.
+    let rest = unassigned_hours(hours, projects);
+    if b2b && rest > 0.0001 {
+        rows.push(MonthProject {
+            name: UNASSIGNED.to_string(),
+            weekday_hours: if weekend { 0.0 } else { rest },
+            weekend_hours: if weekend { rest } else { 0.0 },
+            regular_hours: 0.0,
+            pln: rest * rate,
+        });
+    }
     rows.sort_by(|a, b| {
         (b.weekday_hours + b.weekend_hours + b.regular_hours)
             .total_cmp(&(a.weekday_hours + a.weekend_hours + a.regular_hours))
@@ -202,35 +272,19 @@ async fn get_month(
     tokio::task::spawn_blocking(move || {
         let config = state.config();
         let summary = archive::load_summary_checked().map_err(internal)?;
-        let archived_projects = summary_projects(&summary);
         // presence only — fingerprint check would need a git scan per day
         let git_summaries = load_git_summaries();
-        let live = if first.year() == today().year() && first.month() == today().month() {
-            Some(cached_compute_day(today(), &config))
-        } else {
-            None
-        };
         let mut days = Vec::new();
-        let mut date = first;
-        while date.month() == first.month() {
+        for (date, hours, projects) in month_day_data(&summary, first, &config) {
             let key = date.to_string();
             let stored = summary.days.get(&key);
             let use_live = date == today() && !stored.is_some_and(|day| day.manual_override);
-            let (hours, projects) = if use_live {
-                let live = live.as_ref().unwrap();
-                (live.hours, Some(&live.projects))
-            } else {
-                (
-                    stored.map(|day| day.hours).unwrap_or(0.0),
-                    archived_projects.get(&date),
-                )
-            };
             days.push(MonthDay {
                 date: key,
                 hours,
                 formatted: archive::format_hm(hours),
-                shift: schedule::shift_str(config.effective_shift(date)).to_string(),
-                shift_overridden: config.shift_override(date).is_some(),
+                shift: config.shift_label(date),
+                shift_overridden: config.shift_override(date).is_some() && !config.is_b2b(date),
                 manual_override: stored.is_some_and(|day| day.manual_override),
                 has_note: stored.is_some_and(|day| day.note.as_deref().is_some_and(|n| !n.is_empty())),
                 has_summary: git_summaries.contains_key(&date.to_string()),
@@ -242,9 +296,15 @@ async fn get_month(
                     "archiwum"
                 }
                 .to_string(),
-                projects: month_project_rows(projects),
+                pln: hours * config.day_rate(date),
+                projects: month_project_rows(
+                    &projects,
+                    hours,
+                    config.day_rate(date),
+                    schedule::is_weekend(date),
+                    config.is_b2b(date),
+                ),
             });
-            date += Duration::days(1);
         }
         let total_hours = days.iter().map(|day| day.hours).sum();
         Ok(Json(MonthResponse {
@@ -254,7 +314,10 @@ async fn get_month(
             rates: Rates {
                 weekday_pln: config.overtime_rate_weekday(),
                 weekend_pln: config.overtime_rate_weekend(),
+                b2b_pln: config.billing.hourly_net,
             },
+            total_pln: days.iter().map(|day| day.pln).sum(),
+            b2b_from: config.billing.b2b_from.map(|d| d.to_string()),
             days,
         }))
     })
@@ -432,8 +495,8 @@ fn day_response(date: NaiveDate, config: &config::Config) -> Result<Json<DayResp
     let window = config.effective_work_window(date);
     Ok(Json(DayResponse {
         date: date.to_string(),
-        shift: schedule::shift_str(config.effective_shift(date)).to_string(),
-        shift_overridden: config.shift_override(date).is_some(),
+        shift: config.shift_label(date),
+        shift_overridden: config.shift_override(date).is_some() && !config.is_b2b(date),
         work_window: window.map(|window| WorkWindowResponse {
             start: window.start.format("%H:%M").to_string(),
             end: window.end.format("%H:%M").to_string(),
@@ -464,10 +527,10 @@ async fn put_day(
     let date = parse_date(&date)?;
     let hours = crate::tui::state::parse_hours(&input.hours)
         .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e))?;
-    mutate_day(state, date, move |summary, _| {
+    mutate_day(state, date, move |summary, config| {
         let key = date.to_string();
         let entry = summary.days.entry(key).or_insert_with(|| {
-            archive::day_entry(date, 0.0, None, false)
+            archive::day_entry(date, 0.0, None, false, config)
         });
         entry.hours = hours;
         entry.formatted = archive::format_hm(hours);
@@ -492,7 +555,7 @@ async fn delete_override(
         let computed = cached_compute_day(date, config);
         summary.days.insert(
             date.to_string(),
-            archive::day_entry(date, computed.hours, Some(&computed.projects), false),
+            archive::day_entry(date, computed.hours, Some(&computed.projects), false, config),
         );
         Ok(())
     })
@@ -510,7 +573,7 @@ async fn lock_day(
             let computed = cached_compute_day(date, config);
             summary.days.insert(
                 key.clone(),
-                archive::day_entry(date, computed.hours, Some(&computed.projects), false),
+                archive::day_entry(date, computed.hours, Some(&computed.projects), false, config),
             );
         }
         summary.days.get_mut(&key).unwrap().manual_override = true;
@@ -532,32 +595,51 @@ struct GitProject {
 }
 
 fn collect_day_git(date: NaiveDate, config: &config::Config) -> Result<Vec<GitProject>, ApiError> {
+    collect_git_range(date, date, config.git_author_for(date), "%H:%M", config)
+}
+
+/// `git log` over `from..=to` in every repo under `~/<tracked_path>`.
+/// `author` (B2B days) keeps foreign/pulled commits and the old employee account out.
+fn collect_git_range(
+    from: NaiveDate,
+    to: NaiveDate,
+    author: Option<&str>,
+    time_format: &str,
+    config: &config::Config,
+) -> Result<Vec<GitProject>, ApiError> {
     let root = dirs::home_dir()
         .map(|h| h.join(&config.projects.tracked_path))
         .ok_or_else(|| internal("Brak katalogu domowego".into()))?;
     let mut projects = Vec::new();
-    for entry in fs::read_dir(root).map_err(|e| internal(e.to_string()))?.flatten() {
+    // Brak katalogu z repo (swieza maszyna, test) = brak commitow, nie blad.
+    let Ok(entries) = fs::read_dir(root) else {
+        return Ok(Vec::new());
+    };
+    for entry in entries.flatten() {
         let path = entry.path();
         // Linked worktrees have a `.git` FILE — the main repo already lists
         // their commits via --all, so only real `.git` dirs count.
         if !path.join(".git").is_dir() {
             continue;
         }
-        // ponytail: no author filter — single-user repos; pulled foreign commits would show too
+        let mut args: Vec<String> = vec![
+            "log".into(),
+            "--all".into(),
+            "--no-merges".into(),
+            "--since".into(),
+            format!("{from} 00:00:00"),
+            "--until".into(),
+            format!("{to} 23:59:59"),
+            format!("--date=format-local:{time_format}"),
+            "--pretty=format:%ad\t%s".into(),
+        ];
+        if let Some(author) = author {
+            args.push(format!("--author={author}"));
+        }
         let output = std::process::Command::new("git")
             .arg("-C")
             .arg(&path)
-            .args([
-                "log",
-                "--all",
-                "--no-merges",
-                "--since",
-                &format!("{date} 00:00:00"),
-                "--until",
-                &format!("{date} 23:59:59"),
-                "--date=format-local:%H:%M",
-                "--pretty=format:%ad\t%s",
-            ])
+            .args(&args)
             .output();
         let Ok(output) = output else { continue };
         let mut commits: Vec<GitCommit> = String::from_utf8_lossy(&output.stdout)
@@ -608,6 +690,19 @@ fn load_git_summaries() -> HashMap<String, (u64, String)> {
         .unwrap_or_default()
 }
 
+// Jeden zamek na plik — read-modify-write z dwoch requestow nie moze sie nadpisac.
+static SUMMARIES_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Dopisuje jedno podsumowanie. Zapis po kazdym udanym wywolaniu AI, zeby blad
+/// kolejnego repo nie kasowal tego, za co user juz zaplacil.
+fn store_git_summary(key: String, fingerprint: u64, summary: &str) {
+    let _guard = SUMMARIES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut stored = load_git_summaries();
+    stored.insert(key, (fingerprint, summary.to_string()));
+    save_git_summaries(&stored);
+}
+
 fn save_git_summaries(map: &HashMap<String, (u64, String)>) {
     if let Some(path) = git_summaries_path() {
         if let Some(parent) = path.parent() {
@@ -617,10 +712,45 @@ fn save_git_summaries(map: &HashMap<String, (u64, String)>) {
     }
 }
 
-fn git_fingerprint(projects: &[GitProject]) -> u64 {
+/// claude CLI (subscription auth) with the small Haiku model, on demand only.
+fn run_claude(prompt: &str) -> Result<String, ApiError> {
+    use std::io::Write;
+    let claude_bin = dirs::home_dir()
+        .map(|h| h.join(".local/bin/claude"))
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "claude".to_string());
+    let mut child = std::process::Command::new("timeout")
+        .args(["120", &claude_bin, "-p", "--model", "claude-haiku-4-5"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| internal(format!("Nie można uruchomić claude: {e}")))?;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(prompt.as_bytes())
+        .map_err(|e| internal(e.to_string()))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| internal(e.to_string()))?;
+    let summary = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() || summary.is_empty() {
+        return Err(internal("Nie udało się wygenerować podsumowania".into()));
+    }
+    Ok(summary)
+}
+
+fn git_fingerprint(projects: &[GitProject], author: Option<&str>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     "format-v2".hash(&mut hasher); // bump to invalidate summaries after prompt changes
+    // Only hashed when set, so hashes of pre-cutover days stay identical.
+    if let Some(author) = author {
+        author.hash(&mut hasher);
+    }
     for project in projects {
         project.project.hash(&mut hasher);
         for commit in &project.commits {
@@ -637,11 +767,12 @@ async fn get_git_summary(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let date = parse_date(&date)?;
     tokio::task::spawn_blocking(move || {
-        let projects = collect_day_git(date, &state.config())?;
+        let config = state.config();
+        let projects = collect_day_git(date, &config)?;
         let stored = load_git_summaries();
         let summary = stored
             .get(&date.to_string())
-            .filter(|(fp, _)| *fp == git_fingerprint(&projects))
+            .filter(|(fp, _)| *fp == git_fingerprint(&projects, config.git_author_for(date)))
             .map(|(_, s)| s.clone());
         Ok(Json(serde_json::json!({"summary": summary})))
     })
@@ -655,12 +786,13 @@ async fn post_git_summary(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let date = parse_date(&date)?;
     tokio::task::spawn_blocking(move || {
-        let projects = collect_day_git(date, &state.config())?;
+        let config = state.config();
+        let projects = collect_day_git(date, &config)?;
         if projects.is_empty() {
             return Ok(Json(serde_json::json!({"summary": "Brak commitów tego dnia."})));
         }
-        let fingerprint = git_fingerprint(&projects);
-        let mut stored = load_git_summaries();
+        let fingerprint = git_fingerprint(&projects, config.git_author_for(date));
+        let stored = load_git_summaries();
         if let Some((cached_fp, cached)) = stored.get(&date.to_string()) {
             if *cached_fp == fingerprint {
                 return Ok(Json(serde_json::json!({"summary": cached})));
@@ -679,35 +811,8 @@ async fn post_git_summary(
             }
             prompt.push('\n');
         }
-        // claude CLI (subscription auth) with the small Haiku model, on demand only
-        let claude_bin = dirs::home_dir()
-            .map(|h| h.join(".local/bin/claude"))
-            .filter(|p| p.exists())
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| "claude".to_string());
-        use std::io::Write;
-        let mut child = std::process::Command::new("timeout")
-            .args(["120", &claude_bin, "-p", "--model", "claude-haiku-4-5"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| internal(format!("Nie można uruchomić claude: {e}")))?;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(prompt.as_bytes())
-            .map_err(|e| internal(e.to_string()))?;
-        let output = child
-            .wait_with_output()
-            .map_err(|e| internal(e.to_string()))?;
-        let summary = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !output.status.success() || summary.is_empty() {
-            return Err(internal("Nie udało się wygenerować podsumowania".into()));
-        }
-        stored.insert(date.to_string(), (fingerprint, summary.clone()));
-        save_git_summaries(&stored);
+        let summary = run_claude(&prompt)?;
+        store_git_summary(date.to_string(), fingerprint, &summary);
         Ok(Json(serde_json::json!({"summary": summary})))
     })
     .await
@@ -741,7 +846,7 @@ async fn put_note(
             let computed = compute_day(date, config);
             summary.days.insert(
                 key.clone(),
-                archive::day_entry(date, computed.hours, Some(&computed.projects), false),
+                archive::day_entry(date, computed.hours, Some(&computed.projects), false, config),
             );
         }
         summary.days.get_mut(&key).unwrap().note =
@@ -870,6 +975,203 @@ async fn get_pdf(
         let summary = archive::load_summary_checked().map_err(internal)?;
         let path = pdf::generate_pdf(&summary_projects(&summary), &state.config(), Some(&month))
             .map_err(internal)?;
+        let bytes = fs::read(path).map_err(|e| internal(e.to_string()))?;
+        Ok((
+            [(header::CONTENT_TYPE, "application/pdf")],
+            Body::from(bytes),
+        )
+            .into_response())
+    })
+    .await
+    .map_err(join_error)?
+}
+
+// ==== Zalacznik do faktury (B2B) ====
+
+/// Pierwszy i ostatni dzien B2B w miesiacu `first`. None, gdy miesiac jest caly sprzed przejscia.
+fn b2b_month_range(first: NaiveDate, config: &config::Config) -> Option<(NaiveDate, NaiveDate)> {
+    let last = first
+        .with_day(1)
+        .unwrap()
+        .checked_add_months(chrono::Months::new(1))?
+        - Duration::days(1);
+    let from = config.billing.b2b_from?.max(first);
+    (from <= last).then_some((from, last))
+}
+
+/// Godziny i kwoty per repo za dni B2B miesiaca. Czysta agregacja — bez gita i bez AI.
+/// `days` to te same dni co w widoku miesiaca (z `month_day_data`), wiec godziny bez
+/// przypisania do projektu trafiaja do wiersza `UNASSIGNED` i suma faktury = suma miesiaca.
+pub fn invoice_rows(
+    days: &[(NaiveDate, f64, HashMap<String, jsonl::ProjectHours>)],
+    config: &config::Config,
+) -> Vec<pdf::InvoiceRow> {
+    let mut hours: HashMap<String, f64> = HashMap::new();
+    for (date, day_hours, projects) in days {
+        if !config.is_b2b(*date) {
+            continue;
+        }
+        for (raw_name, entry) in projects {
+            let name = report::normalize_project_name(raw_name, &config.projects.tracked_path);
+            if config.projects.excluded_projects.contains(&name) {
+                continue;
+            }
+            let value = entry.weekday_hours + entry.weekend_hours;
+            if value < 0.0001 {
+                continue;
+            }
+            *hours.entry(name).or_default() += value;
+        }
+        let rest = unassigned_hours(*day_hours, projects);
+        if rest > 0.0001 {
+            *hours.entry(UNASSIGNED.to_string()).or_default() += rest;
+        }
+    }
+    let mut rows: Vec<_> = hours
+        .into_iter()
+        .map(|(project, hours)| pdf::InvoiceRow {
+            project,
+            hours: archive::round2(hours),
+            amount: archive::round2(hours * config.billing.hourly_net),
+            summary: None,
+        })
+        .collect();
+    rows.sort_by(|a, b| b.hours.total_cmp(&a.hours).then_with(|| a.project.cmp(&b.project)));
+    rows
+}
+
+fn invoice_key(month: &str, project: &str) -> String {
+    format!("invoice:{month}:{project}")
+}
+
+/// Wiersze faktury z opisami prac. Opis z cache'u tylko przy zgodnym fingerprincie commitow;
+/// `generate = true` dowoluje brakujace przez claude CLI (platne), po jednym repo na raz.
+/// Zwraca tez bledy poszczegolnych repo — jedno padniete nie przerywa reszty.
+fn invoice_data(
+    month: &str,
+    first: NaiveDate,
+    config: &config::Config,
+    generate: bool,
+) -> Result<(Vec<pdf::InvoiceRow>, Vec<String>), ApiError> {
+    let summary = archive::load_summary_checked().map_err(internal)?;
+    let mut rows = invoice_rows(&month_day_data(&summary, first, config), config);
+    let mut errors = Vec::new();
+    let Some((from, to)) = b2b_month_range(first, config) else {
+        return Ok((rows, errors));
+    };
+    if rows.is_empty() {
+        return Ok((rows, errors));
+    }
+    let author = config.git_author_for(from);
+    let git = collect_git_range(from, to, author, "%Y-%m-%d %H:%M", config)?;
+    let stored = load_git_summaries();
+    for row in &mut rows {
+        let Some(project) = git.iter().find(|p| p.project == row.project) else {
+            continue;
+        };
+        let key = invoice_key(month, &row.project);
+        let fingerprint = git_fingerprint(std::slice::from_ref(project), author);
+        if let Some((cached_fp, cached)) = stored.get(&key) {
+            if *cached_fp == fingerprint {
+                row.summary = Some(cached.clone());
+                continue;
+            }
+        }
+        if !generate {
+            continue;
+        }
+        let mut prompt = format!(
+            "Na podstawie poniższej listy commitów gita z projektu {} za miesiąc {month} napisz \
+             po polsku zwięzły opis prac wykonanych w tym miesiącu — 3-6 zdań, jako opis do \
+             załącznika do faktury. Pisz o efektach dla projektu, nie o commitach. \
+             Bez wstępów, nagłówków i markdownu — zwykły tekst.\n\n",
+            row.project
+        );
+        for commit in &project.commits {
+            prompt.push_str(&format!("- {} {}\n", commit.time, commit.subject));
+        }
+        match run_claude(&prompt) {
+            Ok(summary) => {
+                store_git_summary(key, fingerprint, &summary);
+                row.summary = Some(summary);
+            }
+            Err((_, message)) => errors.push(format!("{}: {message}", row.project)),
+        }
+    }
+    Ok((rows, errors))
+}
+
+#[derive(Serialize)]
+struct InvoiceRowResponse {
+    project: String,
+    hours: f64,
+    amount: f64,
+    summary: Option<String>,
+}
+
+fn invoice_response(
+    month: String,
+    rows: Vec<pdf::InvoiceRow>,
+    errors: Vec<String>,
+    config: &config::Config,
+) -> serde_json::Value {
+    serde_json::json!({
+        "month": month,
+        "hourly_net": config.billing.hourly_net,
+        "total_hours": archive::round2(rows.iter().map(|r| r.hours).sum()),
+        "total_amount": archive::round2(rows.iter().map(|r| r.amount).sum()),
+        "errors": errors,
+        "projects": rows
+            .into_iter()
+            .map(|r| InvoiceRowResponse { project: r.project, hours: r.hours, amount: r.amount, summary: r.summary })
+            .collect::<Vec<_>>(),
+    })
+}
+
+async fn get_invoice_summaries(
+    State(state): State<AppState>,
+    Path(month): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let first = parse_month(&month)?;
+    tokio::task::spawn_blocking(move || {
+        let config = state.config();
+        let (rows, errors) = invoice_data(&month, first, &config, false)?;
+        Ok(Json(invoice_response(month, rows, errors, &config)))
+    })
+    .await
+    .map_err(join_error)?
+}
+
+// Bez `state.mutation` — generowanie trwa minuty, a nie dotyka archiwum;
+// plik z podsumowaniami chroni SUMMARIES_LOCK.
+async fn post_invoice_summaries(
+    State(state): State<AppState>,
+    Path(month): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let first = parse_month(&month)?;
+    tokio::task::spawn_blocking(move || {
+        let config = state.config();
+        let (rows, errors) = invoice_data(&month, first, &config, true)?;
+        Ok(Json(invoice_response(month, rows, errors, &config)))
+    })
+    .await
+    .map_err(join_error)?
+}
+
+/// PDF zalacznika. Czyta wylacznie zapisane podsumowania — generowanie idzie przez POST,
+/// zeby otwarcie PDF-u nie odpalalo (platnego) claude CLI.
+async fn get_invoice(
+    State(state): State<AppState>,
+    Path(month): Path<String>,
+) -> Result<Response, ApiError> {
+    let first = parse_month(&month)?;
+    tokio::task::spawn_blocking(move || {
+        let config = state.config();
+        let (rows, _) = invoice_data(&month, first, &config, false)?;
+        if rows.is_empty() {
+            return Err(bad_request("miesiąc — brak godzin B2B", &month));
+        }
+        let path = pdf::generate_invoice_attachment(&month, &rows, &config).map_err(internal)?;
         let bytes = fs::read(path).map_err(|e| internal(e.to_string()))?;
         Ok((
             [(header::CONTENT_TYPE, "application/pdf")],

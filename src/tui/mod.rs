@@ -11,13 +11,13 @@ use ratatui::crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use crate::archive;
+use crate::{archive, config};
 use state::EditState;
 
 pub fn run() {
     let summary = archive::load_summary();
     let now = Local::now().date_naive();
-    let mut st = EditState::new(summary, now.year(), now.month());
+    let mut st = EditState::new(summary, now.year(), now.month(), config::load_config());
 
     if let Err(e) = run_loop(&mut st) {
         eprintln!("[BŁĄD TUI] {}", e);

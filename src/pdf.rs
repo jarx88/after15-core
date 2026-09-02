@@ -133,32 +133,29 @@ pub fn generate_pdf(
 
     // Calculate totals and rates
     let tracked_path = &config.projects.tracked_path;
-    let hourly_weekday = config.salary.base_monthly_net / config.salary.hours_per_month
-        * config.salary.overtime_multiplier_weekday;
-    let hourly_weekend = config.salary.base_monthly_net / config.salary.hours_per_month
-        * config.salary.overtime_multiplier_weekend;
+    let hourly_weekday = config.overtime_rate_weekday();
+    let hourly_weekend = config.overtime_rate_weekend();
 
     // Sort projects by total hours
     let mut sorted_projects: Vec<_> = project_totals.iter().collect();
     sorted_projects.sort_by(|a, b| {
-        let total_a = a.1.weekday_hours + a.1.weekend_hours;
-        let total_b = b.1.weekday_hours + b.1.weekend_hours;
+        let total_a = a.1.hours.weekday_hours + a.1.hours.weekend_hours;
+        let total_b = b.1.hours.weekday_hours + b.1.hours.weekend_hours;
         total_b.partial_cmp(&total_a).unwrap()
     });
 
     // Calculate grand totals
     let mut grand_total_hours = 0.0;
     let mut grand_total_pln = 0.0;
-    for (_, hours) in &sorted_projects {
-        let total = hours.weekday_hours + hours.weekend_hours;
-        let pln = hours.weekday_hours * hourly_weekday + hours.weekend_hours * hourly_weekend;
-        grand_total_hours += total;
-        grand_total_pln += pln;
+    for (_, money) in &sorted_projects {
+        grand_total_hours += money.hours.weekday_hours + money.hours.weekend_hours;
+        grand_total_pln += money.weekday_pln + money.weekend_pln;
     }
 
     // Table rows
     let mut row_idx = 0;
-    for (proj_name, hours) in &sorted_projects {
+    for (proj_name, money) in &sorted_projects {
+        let hours = &money.hours;
         let display_name = normalize_project_name(proj_name, tracked_path);
         let total_hours = hours.weekday_hours + hours.weekend_hours;
 
@@ -168,7 +165,7 @@ pub fn generate_pdf(
 
         // Weekday row
         if hours.weekday_hours > 0.01 {
-            let pln = hours.weekday_hours * hourly_weekday;
+            let pln = money.weekday_pln;
             let pct = (hours.weekday_hours / grand_total_hours * 100.0).round();
 
             if row_idx % 2 == 1 {
@@ -229,7 +226,7 @@ pub fn generate_pdf(
 
         // Weekend row
         if hours.weekend_hours > 0.01 {
-            let pln = hours.weekend_hours * hourly_weekend;
+            let pln = money.weekend_pln;
             let pct = (hours.weekend_hours / grand_total_hours * 100.0).round();
             let name = if hours.weekday_hours > 0.01 {
                 "".to_string()
@@ -331,16 +328,27 @@ pub fn generate_pdf(
     y -= row_height + 15.0;
 
     layer.set_fill_color(Color::Rgb(Rgb::new(0.5, 0.5, 0.5, None)));
-    layer.use_text(
-        &format!(
-            "Stawka netto: {:.0} PLN/h (dzien), {:.0} PLN/h (weekend)",
-            hourly_weekday, hourly_weekend
-        ),
-        8.0,
-        Mm(MARGIN),
-        Mm(y),
-        &font_regular,
+    let old_rates = format!(
+        "{:.0} PLN/h (dzien), {:.0} PLN/h (weekend)",
+        hourly_weekday, hourly_weekend
     );
+    let b2b_since = filtered_dates
+        .iter()
+        .filter(|date| config.is_b2b(**date))
+        .min()
+        .map(|date| date.format("%d.%m").to_string());
+    let rates_line = match (b2b_since, filtered_dates.iter().any(|d| !config.is_b2b(*d))) {
+        (Some(since), true) => format!(
+            "Stawka netto: {:.0} PLN/h (B2B od {since}), przed przejsciem: {old_rates}",
+            config.billing.hourly_net
+        ),
+        (Some(since), false) => format!(
+            "Stawka netto: {:.0} PLN/h (B2B od {since})",
+            config.billing.hourly_net
+        ),
+        (None, _) => format!("Stawka netto: {old_rates}"),
+    };
+    layer.use_text(&rates_line, 8.0, Mm(MARGIN), Mm(y), &font_regular);
     y -= 4.0;
     layer.use_text(
         "Wszystkie kwoty sa netto dla pracownika",
@@ -450,14 +458,24 @@ fn get_month_info(
     Ok((month_name, year, filtered_dates))
 }
 
+/// Godziny i kwoty projektu w miesiacu. Kwota liczona per dzien stawka tego dnia,
+/// bo w miesiacu przejscia na B2B (np. wrzesien 2026) stawka zmienia sie w srodku.
+#[derive(Default, Clone)]
+struct ProjectMoney {
+    hours: ProjectHours,
+    weekday_pln: f64,
+    weekend_pln: f64,
+}
+
 fn calculate_project_totals(
     daily_projects: &HashMap<NaiveDate, HashMap<String, ProjectHours>>,
     filtered_dates: &[NaiveDate],
     config: &Config,
-) -> HashMap<String, ProjectHours> {
-    let mut totals: HashMap<String, ProjectHours> = HashMap::new();
+) -> HashMap<String, ProjectMoney> {
+    let mut totals: HashMap<String, ProjectMoney> = HashMap::new();
 
     for date in filtered_dates {
+        let rate = config.day_rate(*date);
         if let Some(day_projects) = daily_projects.get(date) {
             for (proj_name, hours) in day_projects {
                 let normalized = normalize_project_name(proj_name, &config.projects.tracked_path);
@@ -467,8 +485,10 @@ fn calculate_project_totals(
                 }
 
                 let entry = totals.entry(normalized).or_default();
-                entry.weekday_hours += hours.weekday_hours;
-                entry.weekend_hours += hours.weekend_hours;
+                entry.hours.weekday_hours += hours.weekday_hours;
+                entry.hours.weekend_hours += hours.weekend_hours;
+                entry.weekday_pln += hours.weekday_hours * rate;
+                entry.weekend_pln += hours.weekend_hours * rate;
             }
         }
     }
@@ -516,5 +536,183 @@ fn get_output_path(month_name: &str, year: i32) -> PathBuf {
         home.join(&filename)
     } else {
         PathBuf::from(&filename)
+    }
+}
+
+/// Wiersz zalacznika do faktury: jeden projekt (repo) w danym miesiacu.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InvoiceRow {
+    pub project: String,
+    pub hours: f64,
+    pub amount: f64,
+    pub summary: Option<String>,
+}
+
+/// Liberation renderuje polskie znaki niepewnie w tym pipelinie, wiec caly PDF jest bez ogonkow
+/// (tak samo jak raport nadgodzin wyzej).
+fn deaccent(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            'ą' => 'a', 'ć' => 'c', 'ę' => 'e', 'ł' => 'l', 'ń' => 'n',
+            'ó' => 'o', 'ś' => 's', 'ź' | 'ż' => 'z',
+            'Ą' => 'A', 'Ć' => 'C', 'Ę' => 'E', 'Ł' => 'L', 'Ń' => 'N',
+            'Ó' => 'O', 'Ś' => 'S', 'Ź' | 'Ż' => 'Z',
+            other => other,
+        })
+        .collect()
+}
+
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+                lines.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+/// Zalacznik do faktury B2B: suma godzin i kwota, potem per repo godziny, kwota i opis prac.
+pub fn generate_invoice_attachment(
+    month: &str,
+    rows: &[InvoiceRow],
+    config: &Config,
+) -> Result<PathBuf, String> {
+    let (year, month_num) = month
+        .split_once('-')
+        .and_then(|(y, m)| Some((y.parse::<i32>().ok()?, m.parse::<u32>().ok()?)))
+        .ok_or_else(|| "Nieprawidlowy format miesiaca (YYYY-MM)".to_string())?;
+
+    let (doc, page1, layer1) = PdfDocument::new(
+        &format!("Zalacznik do faktury {month}"),
+        Mm(PAGE_W),
+        Mm(PAGE_H),
+        "Layer 1",
+    );
+    let mut layer = doc.get_page(page1).get_layer(layer1);
+    let font_regular = load_font(&doc, "LiberationSans-Regular.ttf")?;
+    let font_bold = load_font(&doc, "LiberationSans-Bold.ttf")?;
+
+    let mut y = PAGE_H - MARGIN;
+    let header_height = 25.0;
+    draw_rect(&layer, MARGIN, y - header_height, PAGE_W - 2.0 * MARGIN, header_height, PRIMARY);
+    layer.set_fill_color(Color::Rgb(Rgb::new(WHITE.0, WHITE.1, WHITE.2, None)));
+    layer.use_text(
+        &deaccent(&format!("Zalacznik do faktury za {month_num:02}/{year}")),
+        18.0,
+        Mm(MARGIN + 8.0),
+        Mm(y - 16.0),
+        &font_bold,
+    );
+    y -= header_height + 10.0;
+
+    let total_hours: f64 = rows.iter().map(|row| row.hours).sum();
+    let total_amount: f64 = rows.iter().map(|row| row.amount).sum();
+    layer.set_fill_color(Color::Rgb(Rgb::new(TEXT_DARK.0, TEXT_DARK.1, TEXT_DARK.2, None)));
+    layer.use_text(
+        &deaccent(&format!(
+            "Razem: {} h x {:.0} PLN/h = {:.2} PLN netto",
+            format_hours(total_hours),
+            config.billing.hourly_net,
+            total_amount
+        )),
+        12.0,
+        Mm(MARGIN),
+        Mm(y),
+        &font_bold,
+    );
+    y -= 10.0;
+
+    for row in rows {
+        // 3 linie naglowka + opis; nowa strona zanim wiersz sie urwie
+        if y < MARGIN + 25.0 {
+            let (page, next) = doc.add_page(Mm(PAGE_W), Mm(PAGE_H), "Layer 1");
+            layer = doc.get_page(page).get_layer(next);
+            y = PAGE_H - MARGIN;
+        }
+        draw_rect(&layer, MARGIN, y - 8.0, PAGE_W - 2.0 * MARGIN, 8.0, HEADER_BG);
+        layer.set_fill_color(Color::Rgb(Rgb::new(WHITE.0, WHITE.1, WHITE.2, None)));
+        layer.use_text(&deaccent(&truncate(&row.project, 45)), 10.0, Mm(MARGIN + 3.0), Mm(y - 5.5), &font_bold);
+        layer.use_text(
+            &deaccent(&format!("{} h - {:.2} PLN", format_hours(row.hours), row.amount)),
+            10.0,
+            Mm(PAGE_W - MARGIN - 55.0),
+            Mm(y - 5.5),
+            &font_bold,
+        );
+        y -= 12.0;
+
+        layer.set_fill_color(Color::Rgb(Rgb::new(TEXT_DARK.0, TEXT_DARK.1, TEXT_DARK.2, None)));
+        let text = row.summary.as_deref().unwrap_or("(brak podsumowania - wygeneruj przyciskiem Opisy do FV)");
+        for line in wrap(&deaccent(text), 100) {
+            if y < MARGIN + 8.0 {
+                let (page, next) = doc.add_page(Mm(PAGE_W), Mm(PAGE_H), "Layer 1");
+                layer = doc.get_page(page).get_layer(next);
+                layer.set_fill_color(Color::Rgb(Rgb::new(TEXT_DARK.0, TEXT_DARK.1, TEXT_DARK.2, None)));
+                y = PAGE_H - MARGIN;
+            }
+            layer.use_text(&line, 9.0, Mm(MARGIN + 3.0), Mm(y), &font_regular);
+            y -= 4.5;
+        }
+        y -= 6.0;
+    }
+
+    layer.set_fill_color(Color::Rgb(Rgb::new(0.5, 0.5, 0.5, None)));
+    layer.use_text(
+        &format!("Wygenerowano: {}", chrono::Local::now().format("%Y-%m-%d %H:%M")),
+        8.0,
+        Mm(MARGIN),
+        Mm(MARGIN.max(y)),
+        &font_regular,
+    );
+
+    let output_path = dirs::home_dir()
+        .unwrap_or_default()
+        .join(format!("zalacznik_fv_{month}.pdf"));
+    let file = File::create(&output_path).map_err(|e| format!("Nie mozna utworzyc pliku: {}", e))?;
+    doc.save(&mut BufWriter::new(file))
+        .map_err(|e| format!("Blad zapisu PDF: {}", e))?;
+    Ok(output_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// F2: w miesiacu przejscia kwoty licza sie stawka dnia, nie jedna stawka na miesiac.
+    #[test]
+    fn project_totals_use_the_rate_of_each_day() {
+        let config: Config = serde_json::from_str(
+            r#"{"billing":{"b2b_from":"2026-09-02"},"projects":{"tracked_path":"Programowanie"}}"#,
+        )
+        .unwrap();
+        let day = |d: &str| NaiveDate::parse_from_str(d, "%Y-%m-%d").unwrap();
+        let hours = |weekday: f64, weekend: f64| ProjectHours {
+            weekday_hours: weekday,
+            weekend_hours: weekend,
+            ..Default::default()
+        };
+        let name = "-home-jarek-Programowanie-alpha".to_string();
+        let daily = HashMap::from([
+            (day("2026-09-01"), HashMap::from([(name.clone(), hours(2.0, 0.0))])),
+            (day("2026-09-02"), HashMap::from([(name.clone(), hours(3.0, 0.0))])),
+            (day("2026-09-05"), HashMap::from([(name.clone(), hours(0.0, 1.0))])),
+        ]);
+        let dates = vec![day("2026-09-01"), day("2026-09-02"), day("2026-09-05")];
+
+        let totals = calculate_project_totals(&daily, &dates, &config);
+        let alpha = &totals["alpha"];
+        // 2 h sprzed przejscia po starej stawce + 3 h B2B po 140
+        assert!((alpha.weekday_pln - (2.0 * config.overtime_rate_weekday() + 3.0 * 140.0)).abs() < 1e-6);
+        // sobota juz po przejsciu: 140, a nie stawka weekendowa z pensji
+        assert!((alpha.weekend_pln - 140.0).abs() < 1e-6);
     }
 }

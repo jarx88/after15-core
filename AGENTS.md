@@ -57,6 +57,16 @@ after15-core/
 - Saturday (afternoon week): 8:00-14:00
 - Weekend: all hours = overtime
 
+### B2B regime (from 2026-09-02)
+- `config.json` → `billing`: `b2b_from`, `hourly_net` (140), `git_author_email` (git@jarx.pl), `work_start`/`work_end` (07:00–15:00)
+- From `b2b_from` the shift cycle is ignored: Mon–Fri window is `work_start..work_end` (day job, unpaid), everything else + whole weekends = B2B at flat `hourly_net`
+- `work_window_overrides` for a specific date still win over the B2B window (sick day, leave); `shift_overrides` are ignored on B2B days
+- Since the B2B change, a rebuild writes pre-cutover labels via `shift_label`, which honours `shift_overrides` (earlier code wrote the raw cycle label); only the label moves, hours stay the same
+- Archive `shift` label for those days is `"b2b"`; days before keep the old cycle and old salary-derived rates (settled as employee overtime) — never change how their hours or money are computed
+- Always go through `Config::effective_shift/effective_work_window/shift_label/day_rate/git_author_for`, never `schedule::get_shift_type` directly
+- Git collection filters `--author=<git_author_email>` only on B2B days; before cutover no filter
+- `GET /api/invoice/{YYYY-MM}` → PDF „Załącznik do faktury": B2B hours × rate per repo + monthly AI summary per repo (cache key `invoice:{month}:{project}` in `git_summaries.json`)
+
 ### Session Detection
 - **30-min gap** = new session (`SESSION_GAP_SECONDS = 1800`)
 - **5-min minimum** session duration (`MIN_SESSION_SECONDS = 300`)

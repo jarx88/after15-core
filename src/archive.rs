@@ -6,7 +6,6 @@ use std::fs::{self, File};
 use std::path::PathBuf;
 
 use crate::jsonl::ProjectHours;
-use crate::schedule::get_shift_type;
 
 pub fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
@@ -137,11 +136,12 @@ pub fn day_entry(
     hours: f64,
     projects: Option<&HashMap<String, ProjectHours>>,
     manual_override: bool,
+    config: &crate::config::Config,
 ) -> DayEntry {
     DayEntry {
         hours: round2(hours),
         formatted: format_hm(hours),
-        shift: crate::schedule::shift_str(get_shift_type(date)).to_string(),
+        shift: config.shift_label(date),
         processed: true,
         manual_override,
         projects: projects.map(|projects| {
@@ -341,6 +341,7 @@ pub fn recalc_months(summary: &mut DailySummaryFile) {
 pub fn archive_overtime(
     daily_hours: &HashMap<NaiveDate, f64>,
     daily_projects: &HashMap<NaiveDate, HashMap<String, ProjectHours>>,
+    config: &crate::config::Config,
     debug: bool,
 ) {
     let _lock = lock_archive();
@@ -368,7 +369,6 @@ pub fn archive_overtime(
             continue;
         }
 
-        let shift_type = get_shift_type(*date);
         let projects_entry = daily_projects.get(date).map(|projs| {
             projs
                 .iter()
@@ -388,7 +388,7 @@ pub fn archive_overtime(
         let entry = DayEntry {
             hours: round2(*hours),
             formatted: format_hm(*hours),
-            shift: crate::schedule::shift_str(shift_type).to_string(),
+            shift: config.shift_label(*date),
             processed: true,
             manual_override: false,
             projects: projects_entry, ..Default::default() };
