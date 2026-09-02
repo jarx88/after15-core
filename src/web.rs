@@ -42,6 +42,7 @@ pub fn router() -> Router {
         .route("/api/rebuild", post(rebuild))
         .route("/api/shift", axum::routing::put(put_shift))
         .route("/api/projects", get(get_projects))
+        .route("/api/months", get(get_months))
         .route("/api/report/{file}", get(get_pdf))
         .route("/api/invoice/{month}", get(get_invoice))
         .route(
@@ -66,6 +67,7 @@ pub fn serve(bind: &str) {
             std::process::exit(1);
         });
         println!("After15 web: http://{address}");
+        tokio::spawn(auto_summary_loop());
         axum::serve(listener, router()).await.unwrap_or_else(|e| {
             eprintln!("[BŁĄD] Serwer zakończył pracę: {e}");
         });
@@ -181,6 +183,9 @@ struct MonthResponse {
     total_hours: f64,
     total_formatted: String,
     days_count: usize,
+    average_hours: f64,
+    average_formatted: String,
+    average_months: usize,
     rates: Rates,
     total_pln: f64,
     /// Data przejscia na B2B (ISO) albo null.
@@ -307,10 +312,14 @@ async fn get_month(
             });
         }
         let total_hours = days.iter().map(|day| day.hours).sum();
+        let (average_hours, average_months) = month_average(&summary);
         Ok(Json(MonthResponse {
             days_count: days.iter().filter(|day| day.hours > 0.0).count(),
             total_hours,
             total_formatted: archive::format_hm(total_hours),
+            average_hours,
+            average_formatted: archive::format_hm(average_hours),
+            average_months,
             rates: Rates {
                 weekday_pln: config.overtime_rate_weekday(),
                 weekend_pln: config.overtime_rate_weekend(),
@@ -337,6 +346,7 @@ struct DaySession {
     end: String,
     duration_s: i64,
     overtime_h: f64,
+    source: &'static str,
     projects: Vec<SessionProject>,
 }
 
@@ -388,6 +398,8 @@ pub fn clip_session_to_date(session: &jsonl::Session, date: NaiveDate) -> Option
         start_time: clipped_start.naive_utc(),
         end_time: clipped_end.naive_utc(),
         duration_seconds: (clipped_end - clipped_start).num_seconds(),
+        has_claude: session.has_claude,
+        has_codex: session.has_codex,
     })
 }
 
@@ -472,6 +484,11 @@ fn compute_day(date: NaiveDate, config: &config::Config) -> ComputedDay {
             },
             duration_s: clipped.duration_seconds,
             overtime_h,
+            source: match (clipped.has_claude, clipped.has_codex) {
+                (true, true) => "mixed",
+                (false, true) => "codex",
+                _ => "claude",
+            },
             projects,
         });
     }
@@ -594,12 +611,63 @@ struct GitProject {
     commits: Vec<GitCommit>,
 }
 
+/// `git log` w jednym repo za `from..=to`. `author` (dni B2B) odsiewa commity
+/// z konta pracowniczego i cudze, sciagniete przez pulla.
+fn repo_commits(
+    path: &std::path::Path,
+    from: NaiveDate,
+    to: NaiveDate,
+    author: Option<&str>,
+    time_format: &str,
+) -> Option<GitProject> {
+    let mut args: Vec<String> = vec![
+        "log".into(),
+        // t3 tworzy refs/t3/checkpoints/* przy kazdej turze agenta. To nie sa
+        // commity uzytkownika, zasmiecalyby podsumowanie AI.
+        "--exclude=refs/t3/*".into(),
+        "--all".into(),
+        "--no-merges".into(),
+        "--since".into(),
+        format!("{from} 00:00:00"),
+        "--until".into(),
+        format!("{to} 23:59:59"),
+        format!("--date=format-local:{time_format}"),
+        "--pretty=format:%ad\t%s".into(),
+    ];
+    if let Some(author) = author {
+        args.push(format!("--author={author}"));
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(&args)
+        .output()
+        .ok()?;
+    let mut commits: Vec<GitCommit> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (time, subject) = line.split_once('\t')?;
+            Some(GitCommit {
+                time: time.to_string(),
+                subject: subject.chars().take(120).collect(),
+            })
+        })
+        .collect();
+    if commits.is_empty() {
+        return None;
+    }
+    commits.sort_by(|a, b| a.time.cmp(&b.time));
+    Some(GitProject {
+        project: path.file_name()?.to_string_lossy().to_string(),
+        commits,
+    })
+}
+
 fn collect_day_git(date: NaiveDate, config: &config::Config) -> Result<Vec<GitProject>, ApiError> {
     collect_git_range(date, date, config.git_author_for(date), "%H:%M", config)
 }
 
-/// `git log` over `from..=to` in every repo under `~/<tracked_path>`.
-/// `author` (B2B days) keeps foreign/pulled commits and the old employee account out.
+/// `git log` za `from..=to` we wszystkich repo z `~/<tracked_path>` i `extra_git_paths`.
 fn collect_git_range(
     from: NaiveDate,
     to: NaiveDate,
@@ -607,61 +675,22 @@ fn collect_git_range(
     time_format: &str,
     config: &config::Config,
 ) -> Result<Vec<GitProject>, ApiError> {
-    let root = dirs::home_dir()
-        .map(|h| h.join(&config.projects.tracked_path))
-        .ok_or_else(|| internal("Brak katalogu domowego".into()))?;
-    let mut projects = Vec::new();
+    let home = dirs::home_dir().ok_or_else(|| internal("Brak katalogu domowego".into()))?;
     // Brak katalogu z repo (swieza maszyna, test) = brak commitow, nie blad.
-    let Ok(entries) = fs::read_dir(root) else {
-        return Ok(Vec::new());
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
+    let mut repos: Vec<std::path::PathBuf> = fs::read_dir(home.join(&config.projects.tracked_path))
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default();
+    // Repozytoria spoza tracked_path, np. ~/after15-core.
+    repos.extend(config.projects.extra_git_paths.iter().map(|p| home.join(p)));
+    let mut projects: Vec<GitProject> = repos
+        .iter()
         // Linked worktrees have a `.git` FILE — the main repo already lists
         // their commits via --all, so only real `.git` dirs count.
-        if !path.join(".git").is_dir() {
-            continue;
-        }
-        let mut args: Vec<String> = vec![
-            "log".into(),
-            "--all".into(),
-            "--no-merges".into(),
-            "--since".into(),
-            format!("{from} 00:00:00"),
-            "--until".into(),
-            format!("{to} 23:59:59"),
-            format!("--date=format-local:{time_format}"),
-            "--pretty=format:%ad\t%s".into(),
-        ];
-        if let Some(author) = author {
-            args.push(format!("--author={author}"));
-        }
-        let output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&path)
-            .args(&args)
-            .output();
-        let Ok(output) = output else { continue };
-        let mut commits: Vec<GitCommit> = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| {
-                let (time, subject) = line.split_once('\t')?;
-                Some(GitCommit {
-                    time: time.to_string(),
-                    subject: subject.chars().take(120).collect(),
-                })
-            })
-            .collect();
-        if commits.is_empty() {
-            continue;
-        }
-        commits.sort_by(|a, b| a.time.cmp(&b.time));
-        projects.push(GitProject {
-            project: entry.file_name().to_string_lossy().to_string(),
-            commits,
-        });
-    }
+        .filter(|path| path.join(".git").is_dir())
+        .filter_map(|path| repo_commits(path, from, to, author, time_format))
+        .collect();
     projects.sort_by(|a, b| a.project.cmp(&b.project));
+    projects.dedup_by(|a, b| a.project == b.project);
     Ok(projects)
 }
 
@@ -713,6 +742,10 @@ fn save_git_summaries(map: &HashMap<String, (u64, String)>) {
 }
 
 /// claude CLI (subscription auth) with the small Haiku model, on demand only.
+/// --strict-mcp-config i --setting-sources '' są nośne: bez nich każde wywołanie startuje
+/// wszystkie serwery MCP, hooki i pluginy z ~/.claude (~5,7 s CPU i ~324 MB zamiast ~0,9 s),
+/// a lista commitów staje się osiągalna dla serwerów pamięci w rodzaju Hindsight.
+/// Nie dodawać --tools '': zmierzone 140 s wobec 29 s bez tej flagi.
 fn run_claude(prompt: &str) -> Result<String, ApiError> {
     use std::io::Write;
     let claude_bin = dirs::home_dir()
@@ -721,10 +754,19 @@ fn run_claude(prompt: &str) -> Result<String, ApiError> {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "claude".to_string());
     let mut child = std::process::Command::new("timeout")
-        .args(["120", &claude_bin, "-p", "--model", "claude-haiku-4-5"])
+        .args([
+            "120",
+            &claude_bin,
+            "-p",
+            "--model",
+            "claude-haiku-4-5",
+            "--strict-mcp-config",
+            "--setting-sources",
+            "",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| internal(format!("Nie można uruchomić claude: {e}")))?;
     child
@@ -738,7 +780,9 @@ fn run_claude(prompt: &str) -> Result<String, ApiError> {
         .map_err(|e| internal(e.to_string()))?;
     let summary = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if !output.status.success() || summary.is_empty() {
-        return Err(internal("Nie udało się wygenerować podsumowania".into()));
+        return Err(internal(git_summary_error(&String::from_utf8_lossy(
+            &output.stderr,
+        ))));
     }
     Ok(summary)
 }
@@ -761,6 +805,14 @@ fn git_fingerprint(projects: &[GitProject], author: Option<&str>) -> u64 {
     hasher.finish()
 }
 
+fn git_summary_error(stderr: &str) -> String {
+    if stderr.contains("OAuth session expired") {
+        "Sesja Claude wygasła — zaloguj się ponownie w terminalu poleceniem `claude`.".to_string()
+    } else {
+        "Nie udało się wygenerować podsumowania".to_string()
+    }
+}
+
 async fn get_git_summary(
     State(state): State<AppState>,
     Path(date): Path<String>,
@@ -780,43 +832,64 @@ async fn get_git_summary(
     .map_err(join_error)?
 }
 
+// Zwraca zapisane podsumowanie albo generuje nowe. Wywolanie AI jest platne,
+// wiec generujemy tylko gdy odcisk zestawu commitow sie zmienil.
+fn ensure_git_summary(date: NaiveDate, config: &config::Config) -> Result<String, ApiError> {
+    let projects = collect_day_git(date, config)?;
+    if projects.is_empty() {
+        return Ok("Brak commitów tego dnia.".to_string());
+    }
+    let fingerprint = git_fingerprint(&projects, config.git_author_for(date));
+    let stored = load_git_summaries();
+    if let Some((cached_fp, cached)) = stored.get(&date.to_string()) {
+        if *cached_fp == fingerprint {
+            return Ok(cached.clone());
+        }
+    }
+    let mut prompt = format!(
+        "Na podstawie poniższej listy commitów gita z dnia {date} napisz po polsku zwięzłe \
+         podsumowanie tego, co zostało zrobione. Dla KAŻDEGO projektu osobny akapit w formacie \
+         dokładnie: 'NazwaProjektu: podsumowanie 1-3 zdaniami', akapity rozdzielone pustą linią. \
+         Pisz o efektach a nie o commitach. Bez wstępów, nagłówków i markdownu — zwykły tekst.\n\n"
+    );
+    for project in &projects {
+        prompt.push_str(&format!("Projekt {}:\n", project.project));
+        for commit in &project.commits {
+            prompt.push_str(&format!("- {} {}\n", commit.time, commit.subject));
+        }
+        prompt.push('\n');
+    }
+    let summary = run_claude(&prompt)?;
+    store_git_summary(date.to_string(), fingerprint, &summary);
+    Ok(summary)
+}
+
 async fn post_git_summary(
     State(state): State<AppState>,
     Path(date): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let date = parse_date(&date)?;
     tokio::task::spawn_blocking(move || {
-        let config = state.config();
-        let projects = collect_day_git(date, &config)?;
-        if projects.is_empty() {
-            return Ok(Json(serde_json::json!({"summary": "Brak commitów tego dnia."})));
-        }
-        let fingerprint = git_fingerprint(&projects, config.git_author_for(date));
-        let stored = load_git_summaries();
-        if let Some((cached_fp, cached)) = stored.get(&date.to_string()) {
-            if *cached_fp == fingerprint {
-                return Ok(Json(serde_json::json!({"summary": cached})));
-            }
-        }
-        let mut prompt = format!(
-            "Na podstawie poniższej listy commitów gita z dnia {date} napisz po polsku zwięzłe \
-             podsumowanie tego, co zostało zrobione. Dla KAŻDEGO projektu osobny akapit w formacie \
-             dokładnie: 'NazwaProjektu: podsumowanie 1-3 zdaniami', akapity rozdzielone pustą linią. \
-             Pisz o efektach a nie o commitach. Bez wstępów, nagłówków i markdownu — zwykły tekst.\n\n"
-        );
-        for project in &projects {
-            prompt.push_str(&format!("Projekt {}:\n", project.project));
-            for commit in &project.commits {
-                prompt.push_str(&format!("- {} {}\n", commit.time, commit.subject));
-            }
-            prompt.push('\n');
-        }
-        let summary = run_claude(&prompt)?;
-        store_git_summary(date.to_string(), fingerprint, &summary);
-        Ok(Json(serde_json::json!({"summary": summary})))
+        ensure_git_summary(date, &state.config())
+            .map(|summary| Json(serde_json::json!({ "summary": summary })))
     })
     .await
     .map_err(join_error)?
+}
+
+// Raz na godzine dopisuje brakujace podsumowanie wczorajszego dnia. Gdy jest juz
+// zapisane i commity sie nie zmienily, ensure_git_summary nie wola AI.
+async fn auto_summary_loop() {
+    loop {
+        let date = today() - Duration::days(1);
+        let task = tokio::task::spawn_blocking(move || {
+            ensure_git_summary(date, &config::load_config())
+        });
+        if let Ok(Err((_, message))) = task.await {
+            eprintln!("[WARN] Auto-podsumowanie {date} nieudane: {message}");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    }
 }
 
 #[derive(Deserialize)]
@@ -880,12 +953,21 @@ where
     .map_err(join_error)?
 }
 
-async fn rebuild(State(state): State<AppState>) -> Result<Json<crate::RebuildStats>, ApiError> {
+#[derive(Deserialize)]
+struct RebuildQuery {
+    days: Option<i64>,
+}
+
+async fn rebuild(
+    State(state): State<AppState>,
+    Query(query): Query<RebuildQuery>,
+) -> Result<Json<crate::RebuildStats>, ApiError> {
+    let recent_days = query.days.filter(|d| (1..=365).contains(d));
     let mutation = state.mutation.clone();
     let _guard = mutation.lock().await;
     tokio::task::spawn_blocking(move || {
         let _archive_lock = archive::try_lock_archive().ok_or_else(lock_unavailable)?;
-        crate::rebuild_archive(&state.config(), false)
+        crate::rebuild_archive(&state.config(), false, recent_days)
             .map(Json)
             .map_err(internal)
     })
@@ -904,6 +986,7 @@ struct ProjectResponseRow {
     hours: f64,
     formatted: String,
     share_pct: f64,
+    pln: f64,
 }
 
 #[derive(Serialize)]
@@ -912,6 +995,82 @@ struct ProjectsResponse {
     projects: Vec<ProjectResponseRow>,
     total_hours: f64,
     total_formatted: String,
+    earned_pln: f64,
+}
+
+#[derive(Serialize)]
+struct MonthsRow {
+    month: String,
+    hours: f64,
+    formatted: String,
+    current: bool,
+}
+
+#[derive(Serialize)]
+struct MonthsResponse {
+    months: Vec<MonthsRow>,
+    average_hours: f64,
+    average_formatted: String,
+    average_months: usize,
+    total_hours: f64,
+    total_formatted: String,
+}
+
+fn current_month() -> String {
+    let today = today();
+    format!("{}-{:02}", today.year(), today.month())
+}
+
+/// Miesiące bieżącego roku, po kluczu "RRRR-MM".
+fn this_year_months(
+    summary: &archive::DailySummaryFile,
+) -> impl Iterator<Item = (&String, &archive::MonthEntry)> {
+    let prefix = format!("{}-", crate::current_year());
+    summary
+        .months
+        .iter()
+        .filter(move |(key, _)| key.starts_with(&prefix))
+}
+
+/// Średnia z zamkniętych miesięcy — bieżący jest niepełny i zaniżałby wynik.
+fn month_average(summary: &archive::DailySummaryFile) -> (f64, usize) {
+    let current = current_month();
+    let past: Vec<f64> = this_year_months(summary)
+        .filter(|(key, _)| key.as_str() != current)
+        .map(|(_, month)| month.total_hours)
+        .collect();
+    if past.is_empty() {
+        (0.0, 0)
+    } else {
+        (past.iter().sum::<f64>() / past.len() as f64, past.len())
+    }
+}
+
+async fn get_months() -> Result<Json<MonthsResponse>, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let summary = archive::load_summary_checked().map_err(internal)?;
+        let current = current_month();
+        let months: Vec<MonthsRow> = this_year_months(&summary)
+            .map(|(key, month)| MonthsRow {
+                month: key.clone(),
+                hours: month.total_hours,
+                formatted: archive::format_hm(month.total_hours),
+                current: key.as_str() == current,
+            })
+            .collect();
+        let (average_hours, average_months) = month_average(&summary);
+        let total_hours: f64 = months.iter().map(|month| month.hours).sum();
+        Ok(Json(MonthsResponse {
+            months,
+            average_hours,
+            average_formatted: archive::format_hm(average_hours),
+            average_months,
+            total_hours,
+            total_formatted: archive::format_hm(total_hours),
+        }))
+    })
+    .await
+    .map_err(join_error)?
 }
 
 async fn get_projects(
@@ -925,22 +1084,26 @@ async fn get_projects(
     tokio::task::spawn_blocking(move || {
         let summary = archive::load_summary_checked().map_err(internal)?;
         let full = mode == "all";
-        let totals = crate::calculate_project_totals(&summary_projects(&summary), &state.config(), full);
+        let config = state.config();
+        let totals = crate::calculate_project_totals(&summary_projects(&summary), &config, full);
         let values: Vec<_> = totals
             .into_iter()
             .map(|project| {
                 let hours = project.hours.weekday_hours
                     + project.hours.weekend_hours
                     + if full { project.hours.regular_hours } else { 0.0 };
-                (project.name, hours)
+                // amount_pln jest liczone per dzien stawka tego dnia (B2B vs nadgodziny),
+                // mnozenie sum miesiecznych przez jedna stawke zawyzaloby/zanizalo wrzesien 2026
+                (project.name, hours, project.amount_pln)
             })
             .collect();
-        let total_hours: f64 = values.iter().map(|(_, hours)| hours).sum();
+        let total_hours: f64 = values.iter().map(|(_, hours, _)| hours).sum();
+        let earned_pln: f64 = values.iter().map(|(_, _, pln)| pln).sum();
         Ok(Json(ProjectsResponse {
             mode,
             projects: values
                 .into_iter()
-                .map(|(name, hours)| ProjectResponseRow {
+                .map(|(name, hours, pln)| ProjectResponseRow {
                     name,
                     hours,
                     formatted: archive::format_hm(hours),
@@ -949,10 +1112,12 @@ async fn get_projects(
                     } else {
                         hours / total_hours * 100.0
                     },
+                    pln,
                 })
                 .collect(),
             total_hours,
             total_formatted: archive::format_hm(total_hours),
+            earned_pln,
         }))
     })
     .await
@@ -1265,4 +1430,15 @@ fn lock_unavailable() -> ApiError {
 
 fn join_error(error: tokio::task::JoinError) -> ApiError {
     internal(format!("Błąd zadania serwera: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::git_summary_error;
+
+    #[test]
+    fn reports_expired_claude_session() {
+        assert!(git_summary_error("Failed to authenticate: OAuth session expired")
+            .starts_with("Sesja Claude wygasła"));
+    }
 }

@@ -21,6 +21,8 @@ pub struct Session {
     pub start_time: NaiveDateTime,
     pub end_time: NaiveDateTime,
     pub duration_seconds: i64,
+    pub has_claude: bool,
+    pub has_codex: bool,
 }
 
 #[derive(Deserialize)]
@@ -32,6 +34,14 @@ struct JsonlEntry {
     #[serde(rename = "type")]
     entry_type: Option<String>,
     tool_input: Option<ToolInput>,
+    // Lekki typ zamiast serde_json::Value: serde przeskakuje resztę payloadu
+    // bez budowania drzewa. Przy 5 GB JSONL to różnica rzędu wielkości.
+    payload: Option<CodexPayload>,
+}
+
+#[derive(Deserialize)]
+struct CodexPayload {
+    cwd: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -40,6 +50,18 @@ struct ToolInput {
     file_path: Option<String>,
     path: Option<String>,
     workdir: Option<String>,
+}
+
+/// Treść wiadomości — parsowana osobno, raz na plik (patrz `is_t3_metadata_prompt`),
+/// bo `content` bywa wielomegabajtową tablicą bloków.
+#[derive(Deserialize)]
+struct JsonlMessageEntry {
+    message: Option<JsonlMessage>,
+}
+
+#[derive(Deserialize)]
+struct JsonlMessage {
+    content: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -142,6 +164,12 @@ pub fn load_daily_summary_full(config: &Config, debug: bool) -> DailySummaryData
             if let Some(projects) = day_data.projects {
                 let mut day_projects: HashMap<String, ProjectHours> = HashMap::new();
                 let mut recalculated_hours = 0.0;
+                // Suma wszystkich projektów dnia, przed filtrami — mianownik
+                // skalowania musi być identyczny jak w summary_projects() w web.rs.
+                let all_hours: f64 = projects
+                    .values()
+                    .map(|h| h.weekday_hours + h.weekend_hours)
+                    .sum();
                 for (proj_name, proj_hours) in projects {
                     if config.is_source_excluded(&proj_name) {
                         continue;
@@ -165,6 +193,20 @@ pub fn load_daily_summary_full(config: &Config, debug: bool) -> DailySummaryData
                     day_data.hours,
                     recalculated_hours,
                 );
+                // Manual day total overrides the computed one — scale project hours
+                // proportionally so per-project sums match the correction (same
+                // scaling as summary_projects() in web.rs).
+                let scale = if day_data.manual_override && all_hours > 0.0 {
+                    day_hours / all_hours
+                } else {
+                    1.0
+                };
+                if scale != 1.0 {
+                    for entry in day_projects.values_mut() {
+                        entry.weekday_hours *= scale;
+                        entry.weekend_hours *= scale;
+                    }
+                }
                 if day_hours > 0.0 {
                     result.hours.insert(date, day_hours);
                 }
@@ -190,30 +232,61 @@ pub fn load_daily_summary_full(config: &Config, debug: bool) -> DailySummaryData
 
 pub fn find_recent_jsonl_files(days: i64, debug: bool) -> Vec<PathBuf> {
     let cutoff = Local::now().date_naive() - chrono::Duration::days(days);
-    find_jsonl_files(None, Some(cutoff), debug)
+    find_jsonl_files(Some(cutoff), None, debug)
 }
 
 pub fn find_all_jsonl_files(debug: bool) -> Vec<PathBuf> {
     find_jsonl_files(None, None, debug)
 }
 
+/// Pliki, które mogą zawierać rekordy z `date`: zmodyfikowane najwcześniej dzień
+/// wcześniej i utworzone najpóźniej 2 dni później — plik powstały po tej dacie
+/// nie mógł zapisać jej rekordów. Bez tego filtru dzień sprzed miesiąca ciągnie
+/// wszystkie sesje z ostatniego miesiąca (~1 GB) zamiast kilkudziesięciu MB.
+fn files_touching_date(date: NaiveDate, debug: bool) -> Vec<PathBuf> {
+    find_jsonl_files(
+        Some(date - chrono::Duration::days(1)),
+        Some(date + chrono::Duration::days(2)),
+        debug,
+    )
+}
+
+/// Lokalna północ danego dnia jako `SystemTime` — granice liczymy raz, żeby nie
+/// konwertować stref czasowych dla każdego z ~14 tys. plików w drzewie.
+fn local_midnight(date: NaiveDate) -> std::time::SystemTime {
+    let seconds = date
+        .and_hms_opt(0, 0, 0)
+        .and_then(|dt| dt.and_local_timezone(Local).earliest())
+        .map(|dt| dt.timestamp())
+        .unwrap_or(0);
+    let offset = std::time::Duration::from_secs(seconds.unsigned_abs());
+    if seconds >= 0 {
+        std::time::UNIX_EPOCH + offset
+    } else {
+        std::time::UNIX_EPOCH - offset
+    }
+}
+
 fn find_jsonl_files(
-    date_filter: Option<NaiveDate>,
     min_date: Option<NaiveDate>,
+    max_birth: Option<NaiveDate>,
     debug: bool,
 ) -> Vec<PathBuf> {
     let mut files = Vec::new();
 
-    let claude_dir = dirs::home_dir().map(|p| p.join(".claude"));
-
-    let Some(claude_path) = claude_dir else {
+    let Some(home) = dirs::home_dir() else {
         return files;
     };
 
     let search_dirs = [
-        claude_path.join("projects"),
-        claude_path.join("transcripts"),
+        home.join(".claude/projects"),
+        home.join(".claude/transcripts"),
+        home.join(".codex/sessions"),
+        home.join(".codex/archived_sessions"),
     ];
+
+    let min_modified = min_date.map(local_midnight);
+    let max_created = max_birth.map(|date| local_midnight(date + chrono::Duration::days(1)));
 
     for search_dir in &search_dirs {
         if !search_dir.exists() {
@@ -225,35 +298,34 @@ fn find_jsonl_files(
             .into_iter()
             .filter_map(|e| e.ok())
         {
-            let path = entry.path();
-
-            if !path.is_file() {
+            // file_type() pochodzi z readdir — bez dodatkowego stat na wpis
+            if !entry.file_type().is_file() {
                 continue;
             }
+
+            let path = entry.path();
 
             if path.extension().map(|e| e != "jsonl").unwrap_or(true) {
                 continue;
             }
 
-            let path_str = path.to_string_lossy();
-            if path_str.contains("/subagents/") {
+            if path.to_string_lossy().contains("/subagents/") {
                 continue;
             }
 
-            if let Ok(metadata) = fs::metadata(path) {
-                if let Ok(modified) = metadata.modified() {
-                    let modified_date = chrono::DateTime::<Local>::from(modified).date_naive();
-
-                    if let Some(filter_date) = date_filter {
-                        if modified_date != filter_date {
-                            continue;
-                        }
+            if min_modified.is_some() || max_created.is_some() {
+                let Ok(metadata) = entry.metadata() else {
+                    continue;
+                };
+                if let (Some(cutoff), Ok(modified)) = (min_modified, metadata.modified()) {
+                    if modified < cutoff {
+                        continue;
                     }
-
-                    if let Some(cutoff) = min_date {
-                        if modified_date < cutoff {
-                            continue;
-                        }
+                }
+                // created() nieobsługiwane na starszych FS → brak filtru (jak dotąd)
+                if let (Some(limit), Ok(created)) = (max_created, metadata.created()) {
+                    if created >= limit {
+                        continue;
                     }
                 }
             }
@@ -279,7 +351,7 @@ pub fn load_recent_overtime(days: i64, config: &Config, debug: bool) -> TodayDat
 
 pub fn load_today_overtime(config: &Config, debug: bool) -> TodayData {
     let today = Local::now().date_naive();
-    let files = find_jsonl_files(None, Some(today), debug);
+    let files = find_jsonl_files(Some(today), None, debug);
     load_overtime_from_files(files, Some(today), config, debug)
 }
 
@@ -290,9 +362,7 @@ pub fn load_all_overtime(config: &Config, debug: bool) -> TodayData {
 pub fn load_sessions_for_date(date: NaiveDate, config: &Config, debug: bool) -> Vec<Session> {
     use chrono_tz::Europe::Warsaw;
 
-    // Records for `date` can only live in files modified on/after that day;
-    // -1 day margin covers timezone skew around midnight.
-    let files = find_jsonl_files(None, Some(date - chrono::Duration::days(1)), debug);
+    let files = files_touching_date(date, debug);
 
     let mut all_records = collect_timestamps_parallel(&files);
 
@@ -324,6 +394,7 @@ const MIN_SESSION_SECONDS: i64 = 5 * 60;
 struct TimestampRecord {
     timestamp: NaiveDateTime,
     project: String,
+    is_codex: bool,
 }
 
 fn load_overtime_from_files(
@@ -451,7 +522,7 @@ fn load_overtime_from_files(
 /// for that date cannot have changed.
 pub fn files_fingerprint_for_date(date: NaiveDate) -> u64 {
     use std::hash::{Hash, Hasher};
-    let files = find_jsonl_files(None, Some(date - chrono::Duration::days(1)), false);
+    let files = files_touching_date(date, false);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for path in &files {
         path.hash(&mut hasher);
@@ -501,10 +572,26 @@ fn collect_timestamps_from_file(path: &Path) -> Vec<TimestampRecord> {
     let reader = BufReader::new(file);
     let default_project = extract_project_name(path);
     let is_transcript = default_project == "transcripts";
+    let is_codex = path.to_string_lossy().contains("/.codex/");
+    let mut codex_project = None;
+    let mut first_user_seen = false;
+    let mut is_t3_metadata_session = false;
 
     for line in reader.lines().flatten() {
         if let Ok(entry) = serde_json::from_str::<JsonlEntry>(&line) {
+            if is_codex
+                && let Some(cwd) = entry
+                    .payload
+                    .as_ref()
+                    .and_then(|payload| payload.cwd.as_deref())
+            {
+                codex_project = extract_project_from_path(cwd);
+            }
             let entry_type = entry.entry_type.as_deref().unwrap_or("");
+            if !is_codex && entry_type == "user" && !first_user_seen {
+                first_user_seen = true;
+                is_t3_metadata_session = is_t3_metadata_prompt(&line);
+            }
             match entry_type {
                 "system" | "file-history-snapshot" | "queue-operation"
                 | "custom-title" | "agent-name" | "last-prompt" | "pr-link" => continue,
@@ -513,7 +600,12 @@ fn collect_timestamps_from_file(path: &Path) -> Vec<TimestampRecord> {
 
             if let Some(ref ts_str) = entry.timestamp {
                 if let Some(ts) = parse_timestamp(ts_str) {
-                    let project = if is_transcript {
+                    let project = if is_codex {
+                        let Some(project) = codex_project.clone() else {
+                            continue;
+                        };
+                        project
+                    } else if is_transcript {
                         extract_project_from_tool_input(&entry)
                             .unwrap_or_else(|| default_project.clone())
                     } else {
@@ -523,13 +615,32 @@ fn collect_timestamps_from_file(path: &Path) -> Vec<TimestampRecord> {
                     records.push(TimestampRecord {
                         timestamp: ts,
                         project,
+                        is_codex,
                     });
                 }
             }
         }
     }
 
-    records
+    if is_t3_metadata_session {
+        Vec::new()
+    } else {
+        records
+    }
+}
+
+fn is_t3_metadata_prompt(line: &str) -> bool {
+    matches!(
+        serde_json::from_str::<JsonlMessageEntry>(line)
+            .ok()
+            .and_then(|entry| entry.message)
+            .and_then(|message| message.content)
+            .as_ref()
+            .and_then(|content| content.as_str())
+            .and_then(|content| content.lines().next()),
+        Some("You write concise thread titles for coding conversations.")
+            | Some("You generate concise git branch names.")
+    )
 }
 
 const PROGRAMOWANIE_DIR: &str = "Programowanie";
@@ -582,6 +693,10 @@ fn extract_project_from_tool_input(entry: &JsonlEntry) -> Option<String> {
         .or(tool_input.path.as_ref())
         .or(tool_input.workdir.as_ref())?;
 
+    extract_project_from_path(file_path)
+}
+
+fn extract_project_from_path(file_path: &str) -> Option<String> {
     let project_name = if let Some((_, after)) = file_path.split_once("/Programowanie/") {
         after.split('/').next().filter(|s| !s.is_empty())?
     } else if let Some(name) = extract_worktree_project_from_filepath(file_path) {
@@ -608,6 +723,8 @@ fn build_sessions_from_records(records: &[TimestampRecord], debug: bool) -> Vec<
     let mut session_end = records[0].timestamp;
     let mut session_projects: HashMap<String, usize> = HashMap::new();
     session_projects.insert(records[0].project.clone(), 1);
+    let mut session_has_claude = !records[0].is_codex;
+    let mut session_has_codex = records[0].is_codex;
     let mut session_count = 0;
 
     for i in 1..records.len() {
@@ -629,13 +746,19 @@ fn build_sessions_from_records(records: &[TimestampRecord], debug: bool) -> Vec<
                     start_time: session_start,
                     end_time: session_end,
                     duration_seconds: duration,
+                    has_claude: session_has_claude,
+                    has_codex: session_has_codex,
                 });
                 session_count += 1;
             }
             session_start = records[i].timestamp;
             session_projects.clear();
+            session_has_claude = false;
+            session_has_codex = false;
         }
         session_end = records[i].timestamp;
+        session_has_claude |= !records[i].is_codex;
+        session_has_codex |= records[i].is_codex;
         *session_projects
             .entry(records[i].project.clone())
             .or_insert(0) += 1;
@@ -656,6 +779,8 @@ fn build_sessions_from_records(records: &[TimestampRecord], debug: bool) -> Vec<
             start_time: session_start,
             end_time: session_end,
             duration_seconds: duration,
+            has_claude: session_has_claude,
+            has_codex: session_has_codex,
         });
     }
 
@@ -708,11 +833,114 @@ fn extract_project_name(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    fn record(timestamp: &str, project: &str) -> TimestampRecord {
+        TimestampRecord {
+            timestamp: NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S").unwrap(),
+            project: project.to_string(),
+            is_codex: false,
+        }
+    }
+
+    fn codex_record(timestamp: &str, project: &str) -> TimestampRecord {
+        TimestampRecord {
+            is_codex: true,
+            ..record(timestamp, project)
+        }
+    }
+
     #[test]
     fn test_parse_timestamp() {
         let ts = "2026-01-28T06:58:16.234Z";
         let parsed = parse_timestamp(ts).unwrap();
         assert_eq!(parsed.to_string(), "2026-01-28 06:58:16");
+    }
+
+    #[test]
+    fn t3_metadata_helpers_are_not_work_sessions() {
+        for prompt in [
+            "You write concise thread titles for coding conversations.",
+            "You generate concise git branch names.",
+        ] {
+            let line = serde_json::json!({
+                "type": "user",
+                "message": {"content": prompt}
+            })
+            .to_string();
+            assert!(is_t3_metadata_prompt(&line));
+        }
+    }
+
+    #[test]
+    fn claude_only_session_values_stay_unchanged() {
+        let project = "-home-jarek-Programowanie-farmaster2";
+        let records = vec![
+            record("2026-07-12 04:52:00", project),
+            record("2026-07-12 05:21:00", project),
+            record("2026-07-12 07:11:00", project),
+            record("2026-07-12 07:35:00", project),
+            record("2026-07-12 08:00:00", project),
+            record("2026-07-12 08:20:00", project),
+            record("2026-07-12 08:43:00", project),
+        ];
+
+        let sessions = build_sessions_from_records(&records, false);
+
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].duration_seconds, 29 * 60);
+        assert_eq!(sessions[1].duration_seconds, 92 * 60);
+        assert!(
+            sessions
+                .iter()
+                .all(|session| session.has_claude && !session.has_codex)
+        );
+    }
+
+    #[test]
+    fn overlapping_claude_and_codex_activity_is_counted_once() {
+        let claude = "-home-jarek-Programowanie-claude";
+        let codex = "-home-jarek-Programowanie-codex";
+        let mut records = vec![
+            record("2026-07-12 10:00:00", claude),
+            record("2026-07-12 10:20:00", claude),
+            record("2026-07-12 10:40:00", claude),
+            record("2026-07-12 11:00:00", claude),
+            codex_record("2026-07-12 10:05:00", codex),
+            codex_record("2026-07-12 10:25:00", codex),
+            codex_record("2026-07-12 10:45:00", codex),
+            codex_record("2026-07-12 10:55:00", codex),
+        ];
+        records.sort_by_key(|record| record.timestamp);
+
+        let sessions = build_sessions_from_records(&records, false);
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].duration_seconds, 60 * 60);
+        assert!(sessions[0].has_claude);
+        assert!(sessions[0].has_codex);
+
+        let codex_only = build_sessions_from_records(
+            &[
+                codex_record("2026-07-12 12:00:00", codex),
+                codex_record("2026-07-12 12:10:00", codex),
+            ],
+            false,
+        );
+        assert!(!codex_only[0].has_claude);
+        assert!(codex_only[0].has_codex);
+    }
+
+    #[test]
+    fn codex_session_meta_maps_cwd_to_project() {
+        let entry: JsonlEntry = serde_json::from_str(
+            r#"{"timestamp":"2026-07-13T09:59:16.433Z","type":"session_meta","payload":{"cwd":"/home/jarek/Programowanie/farmaster2"}}"#,
+        )
+        .unwrap();
+        let cwd = entry.payload.as_ref().and_then(|p| p.cwd.as_deref()).unwrap();
+
+        assert_eq!(
+            extract_project_from_path(cwd).as_deref(),
+            Some("-home-jarek-Programowanie-farmaster2")
+        );
     }
 
     #[test]
@@ -795,3 +1023,4 @@ mod tests {
         );
     }
 }
+

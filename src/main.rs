@@ -10,7 +10,7 @@ use report::format_hm;
 
 #[derive(Parser)]
 #[command(name = "after15")]
-#[command(about = "Overtime calculator for Claude Code sessions")]
+#[command(about = "Kalkulator nadgodzin z sesji Claude Code i Codex")]
 struct Cli {
     #[arg(long, help = "Show compact statusline (today/month)")]
     statusline: bool,
@@ -36,7 +36,7 @@ struct Cli {
     #[arg(long, help = "Send daily_summary.json backup via Telegram")]
     backup: bool,
 
-    #[arg(long, help = "Pokaż sumę godzin per projekt od początku monitorowania")]
+    #[arg(long, help = "Pokaż sumę godzin per projekt od początku bieżącego roku")]
     project_totals: bool,
 
     #[arg(long, help = "Z --project-totals: uwzględnij także godziny w ramach godzin pracy")]
@@ -68,7 +68,7 @@ fn main() {
 
     if cli.rebuild {
         let _lock = archive::lock_archive();
-        match after15::rebuild_archive(&config, cli.debug) {
+        match after15::rebuild_archive(&config, cli.debug, None) {
             Ok(stats) => println!(
                 "Przebudowano archiwum: {} dni z JSONL, {} dni łącznie (manual_override zachowane)",
                 stats.updated, stats.total_days
@@ -221,7 +221,7 @@ fn print_project_totals(
     let header_title = if full {
         "[SUMA GODZIN PER PROJEKT — pełny kontekst (nadgodziny + godziny pracy)]"
     } else {
-        "[SUMA GODZIN PER PROJEKT — od początku monitorowania]"
+        "[SUMA GODZIN PER PROJEKT — od początku bieżącego roku]"
     };
     println!("{}", header_title.cyan().bold());
     if let (Some(f), Some(l)) = (global_first, global_last) {

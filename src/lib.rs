@@ -8,7 +8,7 @@ pub mod schedule;
 pub mod tui;
 pub mod web;
 
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -18,8 +18,18 @@ pub struct RebuildStats {
     pub total_days: usize,
 }
 
-pub fn rebuild_archive(config: &config::Config, debug: bool) -> Result<RebuildStats, String> {
-    let fresh = jsonl::load_all_overtime(config, debug);
+/// `recent_days = Some(n)` przelicza tylko ostatnie n dni (parsuje kilkaset
+/// plików zamiast całych ~5 GB archiwum JSONL); `None` = pełne przeliczenie.
+pub fn rebuild_archive(
+    config: &config::Config,
+    debug: bool,
+    recent_days: Option<i64>,
+) -> Result<RebuildStats, String> {
+    let cutoff = recent_days.map(|d| chrono::Local::now().date_naive() - chrono::Duration::days(d));
+    let fresh = match recent_days {
+        Some(days) => jsonl::load_recent_overtime(days, config, debug),
+        None => jsonl::load_all_overtime(config, debug),
+    };
     let mut summary = archive::load_summary_checked()?;
 
     if !summary.days.is_empty() {
@@ -29,6 +39,11 @@ pub fn rebuild_archive(config: &config::Config, debug: bool) -> Result<RebuildSt
 
     let mut updated = 0;
     for (date, hours) in &fresh.hours {
+        // Dni sprzed cutoffu mają w oknie tylko część plików — nie nadpisujemy
+        // ich niepełną wartością.
+        if cutoff.is_some_and(|c| *date < c) {
+            continue;
+        }
         let key = date.format("%Y-%m-%d").to_string();
         if summary.days.get(&key).is_some_and(|day| day.manual_override) {
             continue;
@@ -49,6 +64,15 @@ pub fn rebuild_archive(config: &config::Config, debug: bool) -> Result<RebuildSt
     })
 }
 
+/// Podsumowania zbiorcze liczymy tylko za bieżący rok — starsze miesiące
+/// zostają w archiwum i w widoku miesięcznym, ale nie wchodzą do sum i średnich.
+pub fn current_year() -> i32 {
+    chrono::Utc::now()
+        .with_timezone(&chrono_tz::Europe::Warsaw)
+        .date_naive()
+        .year()
+}
+
 #[derive(Clone)]
 pub struct ProjectTotal {
     pub name: String,
@@ -67,7 +91,11 @@ pub fn calculate_project_totals(
     full: bool,
 ) -> Vec<ProjectTotal> {
     let mut totals: HashMap<String, ProjectTotal> = HashMap::new();
+    let year = current_year();
     for (date, projects) in daily_projects {
+        if date.year() != year {
+            continue;
+        }
         for (raw_name, hours) in projects {
             let name = report::normalize_project_name(raw_name, &config.projects.tracked_path);
             if config.projects.excluded_projects.contains(&name) {
