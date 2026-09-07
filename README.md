@@ -48,6 +48,18 @@ cargo build --release
 
 Binarke znajdziesz w `./target/release/after15`
 
+### Wdrożenie na tej maszynie
+
+```bash
+./deploy.sh
+```
+
+Skrypt robi `cargo install --path .` do `~/.cargo/bin/after15` (to widzi PATH, serwis
+`after15-web` i symlink `~/after15` dla paska Claude), po czym restartuje serwis.
+Nie wdrażaj przez `cargo build --release`: jego wynik ląduje we wspólnym
+`~/.cargo/shared-target`, do którego pisze każdy worktree, więc pasek mógłby
+dostać binarkę z cudzej gałęzi.
+
 ### Opcjonalnie: Dodaj do PATH
 
 ```bash

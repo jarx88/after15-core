@@ -98,8 +98,8 @@ fn main() {
         let mut daily_projects = summary.projects;
         let today = Local::now().date_naive();
 
-        if let Some(_daily_lock) = lock_daily_automation() {
-            if needs_daily_archive() {
+        if let Some(_daily_lock) = archive::lock_daily_automation() {
+            if archive::needs_daily_archive() {
                 let recent_data = jsonl::load_recent_overtime(1, &config, false);
                 for (date, hours) in recent_data.hours {
                     if date != today && !daily_hours.contains_key(&date) {
@@ -113,7 +113,7 @@ fn main() {
                 }
                 archive::archive_overtime(&daily_hours, &daily_projects, &config, false);
                 auto_telegram_backup(&config);
-                mark_daily_archive_done();
+                archive::mark_daily_archive_done();
             }
         }
 
@@ -518,58 +518,6 @@ fn print_explain(date: chrono::NaiveDate, debug: bool) {
     );
 }
 
-fn needs_daily_archive() -> bool {
-    let marker_path = dirs::data_dir()
-        .or_else(|| dirs::home_dir().map(|p| p.join(".local/share")))
-        .map(|p| p.join("claude-overtime/.statusline_last_archive"));
-
-    let Some(marker) = marker_path else {
-        return true;
-    };
-
-    if marker.exists() {
-        if let Ok(content) = std::fs::read_to_string(&marker) {
-            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-            if content.trim() == today {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-fn lock_daily_automation() -> Option<File> {
-    let lock_path = dirs::data_dir()
-        .or_else(|| dirs::home_dir().map(|p| p.join(".local/share")))
-        .map(|p| p.join("claude-overtime/.daily_automation.lock"))?;
-
-    if let Some(parent) = lock_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(&lock_path)
-        .ok()?;
-
-    file.try_lock_exclusive().ok()?;
-    Some(file)
-}
-
-fn mark_daily_archive_done() {
-    let marker_path = dirs::data_dir()
-        .or_else(|| dirs::home_dir().map(|p| p.join(".local/share")))
-        .map(|p| p.join("claude-overtime/.statusline_last_archive"));
-
-    if let Some(marker) = marker_path {
-        if let Some(parent) = marker.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let _ = std::fs::write(&marker, &today);
-    }
-}
 
 fn auto_telegram_backup(config: &config::Config) {
     if !config.telegram.is_configured() {

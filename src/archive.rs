@@ -80,6 +80,48 @@ pub fn lock_archive() -> Option<File> {
     Some(file)
 }
 
+fn data_file(name: &str) -> Option<PathBuf> {
+    dirs::data_dir()
+        .or_else(|| dirs::home_dir().map(|p| p.join(".local/share")))
+        .map(|p| p.join("claude-overtime").join(name))
+}
+
+/// Znacznik dnia ostatniej dobowej archiwizacji. Wspólny dla paska Claude
+/// (`--statusline`) i pętli serwisu web, żeby nie robić tego dwa razy dziennie.
+pub fn needs_daily_archive() -> bool {
+    let Some(marker) = data_file(".statusline_last_archive") else {
+        return true;
+    };
+    let today = Local::now().format("%Y-%m-%d").to_string();
+    fs::read_to_string(&marker)
+        .map(|content| content.trim() != today)
+        .unwrap_or(true)
+}
+
+pub fn lock_daily_automation() -> Option<File> {
+    let lock_path = data_file(".daily_automation.lock")?;
+    if let Some(parent) = lock_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .ok()?;
+    file.try_lock_exclusive().ok()?;
+    Some(file)
+}
+
+pub fn mark_daily_archive_done() {
+    if let Some(marker) = data_file(".statusline_last_archive") {
+        if let Some(parent) = marker.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let _ = fs::write(&marker, &today);
+    }
+}
+
 pub fn try_lock_archive() -> Option<File> {
     let lock_path = get_summary_path()?.with_extension("json.lock");
     if let Some(parent) = lock_path.parent() {

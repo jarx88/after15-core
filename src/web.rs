@@ -979,8 +979,31 @@ async fn post_git_summary(
 
 // Raz na godzine dopisuje brakujace podsumowanie wczorajszego dnia. Gdy jest juz
 // zapisane i commity sie nie zmienily, ensure_git_summary nie wola AI.
+/// Dobowa archiwizacja wczorajszych godzin z JSONL. Wcześniej robił to tylko
+/// pasek Claude Code (`after15 --statusline`), więc bez Claude archiwum stało.
+/// Znacznik i lock są wspólne z paskiem, więc dzień zapisuje się raz.
+fn daily_archive_tick() {
+    let Some(_daily_lock) = archive::lock_daily_automation() else {
+        return;
+    };
+    if !archive::needs_daily_archive() {
+        return;
+    }
+    let Some(_archive_lock) = archive::try_lock_archive() else {
+        return;
+    };
+    match crate::rebuild_archive(&config::load_config(), false, Some(2)) {
+        Ok(stats) => {
+            eprintln!("[INFO] Dobowe archiwum: {} dni z JSONL", stats.updated);
+            archive::mark_daily_archive_done();
+        }
+        Err(message) => eprintln!("[WARN] Dobowe archiwum nieudane: {message}"),
+    }
+}
+
 async fn auto_summary_loop() {
     loop {
+        let _ = tokio::task::spawn_blocking(daily_archive_tick).await;
         let date = today() - Duration::days(1);
         let task =
             tokio::task::spawn_blocking(move || ensure_git_summary(date, &config::load_config()));
