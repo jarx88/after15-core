@@ -1380,10 +1380,10 @@ pub fn invoice_rows(
     rows
 }
 
-/// `invoice2`: prompt dla nietechnicznego przełożonego (2026-09-07); stare klucze
-/// `invoice:` zostają w pliku jako martwe, nowe opisy generują się od zera.
+/// `invoice3`: kompaktowy prompt dla nietechnicznego przełożonego (2026-09-07);
+/// stare klucze `invoice:`/`invoice2:` zostają w pliku jako martwe.
 fn invoice_key(month: &str, project: &str) -> String {
-    format!("invoice2:{month}:{project}")
+    format!("invoice3:{month}:{project}")
 }
 
 /// Wiersze faktury z opisami prac. Opis z cache'u tylko przy zgodnym fingerprincie commitow;
@@ -1427,7 +1427,8 @@ fn invoice_data(
              opis prac do załącznika do faktury dla przełożonego, który NIE jest programistą \
              i ma zrozumieć, co konkretnie zostało zrobione i po co.\n\
              Zasady:\n\
-             - 4-8 zdań, zwykły tekst, bez nagłówków, list i markdownu.\n\
+             - Maksymalnie kompaktowo: 2-4 krótkie zdania, łącznie do 60 słów. Zwykły tekst, \
+             bez nagłówków, list i markdownu. Każde zdanie ma nieść jeden konkretny efekt.\n\
              - Pisz o efektach dla użytkowników i firmy: co teraz działa, co zostało naprawione, \
              jaki problem to rozwiązuje, co użytkownik widzi inaczej.\n\
              - Zero żargonu technicznego: nie używaj słów typu commit, refactor, endpoint, API, \
@@ -1436,8 +1437,8 @@ fn invoice_data(
              (np. zamiast „reconciliation po MD5” napisz „automatyczne wykrywanie, które pliki \
              z cennikiem naprawdę się zmieniły”).\n\
              - Nazwy ekranów i funkcji podawaj tak, jak widzi je użytkownik.\n\
-             - Nie wymieniaj commitów po kolei, grupuj w tematy. Pomiń drobne porządki w kodzie, \
-             chyba że mają widoczny skutek.\n\n",
+             - Nie wymieniaj commitów po kolei, grupuj w tematy i zostaw tylko 2-4 najważniejsze. \
+             Pomiń drobne porządki w kodzie, chyba że mają widoczny skutek.\n\n",
             row.project
         );
         for commit in &project.commits {
