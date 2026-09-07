@@ -1380,8 +1380,10 @@ pub fn invoice_rows(
     rows
 }
 
+/// `invoice2`: prompt dla nietechnicznego przełożonego (2026-09-07); stare klucze
+/// `invoice:` zostają w pliku jako martwe, nowe opisy generują się od zera.
 fn invoice_key(month: &str, project: &str) -> String {
-    format!("invoice:{month}:{project}")
+    format!("invoice2:{month}:{project}")
 }
 
 /// Wiersze faktury z opisami prac. Opis z cache'u tylko przy zgodnym fingerprincie commitow;
@@ -1421,10 +1423,21 @@ fn invoice_data(
             continue;
         }
         let mut prompt = format!(
-            "Na podstawie poniższej listy commitów gita z projektu {} za miesiąc {month} napisz \
-             po polsku zwięzły opis prac wykonanych w tym miesiącu — 3-6 zdań, jako opis do \
-             załącznika do faktury. Pisz o efektach dla projektu, nie o commitach. \
-             Bez wstępów, nagłówków i markdownu — zwykły tekst.\n\n",
+            "Poniżej lista commitów gita z projektu {} za miesiąc {month}. Napisz po polsku \
+             opis prac do załącznika do faktury dla przełożonego, który NIE jest programistą \
+             i ma zrozumieć, co konkretnie zostało zrobione i po co.\n\
+             Zasady:\n\
+             - 4-8 zdań, zwykły tekst, bez nagłówków, list i markdownu.\n\
+             - Pisz o efektach dla użytkowników i firmy: co teraz działa, co zostało naprawione, \
+             jaki problem to rozwiązuje, co użytkownik widzi inaczej.\n\
+             - Zero żargonu technicznego: nie używaj słów typu commit, refactor, endpoint, API, \
+             cache, migracja, hook, deploy, CI, merge, branch, cursor, MD5, fingerprint, \
+             reconciliation. Jeśli musisz nazwać mechanizm, opisz go po ludzku \
+             (np. zamiast „reconciliation po MD5” napisz „automatyczne wykrywanie, które pliki \
+             z cennikiem naprawdę się zmieniły”).\n\
+             - Nazwy ekranów i funkcji podawaj tak, jak widzi je użytkownik.\n\
+             - Nie wymieniaj commitów po kolei, grupuj w tematy. Pomiń drobne porządki w kodzie, \
+             chyba że mają widoczny skutek.\n\n",
             row.project
         );
         for commit in &project.commits {
