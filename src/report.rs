@@ -113,9 +113,13 @@ pub fn print_full_report(
     } else {
         println!(
             "{}",
-            format!("💰 SUMA_NADGODZIN OD {}-01-01: {}", today.year(), format_hm(total_hours))
-                .cyan()
-                .bold()
+            format!(
+                "💰 SUMA_NADGODZIN OD {}-01-01: {}",
+                today.year(),
+                format_hm(total_hours)
+            )
+            .cyan()
+            .bold()
         );
     }
     println!();

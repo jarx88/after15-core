@@ -174,10 +174,8 @@ pub fn load_daily_summary_full(config: &Config, debug: bool) -> DailySummaryData
                     if config.is_source_excluded(&proj_name) {
                         continue;
                     }
-                    let normalized = normalize_project_name(
-                        &proj_name,
-                        &config.projects.tracked_path,
-                    );
+                    let normalized =
+                        normalize_project_name(&proj_name, &config.projects.tracked_path);
                     if config.projects.excluded_projects.contains(&normalized) {
                         continue;
                     }
@@ -188,11 +186,8 @@ pub fn load_daily_summary_full(config: &Config, debug: bool) -> DailySummaryData
                     entry.weekend_hours += proj_hours.weekend_hours;
                     entry.regular_hours += proj_hours.regular_hours;
                 }
-                let day_hours = resolve_day_hours(
-                    day_data.manual_override,
-                    day_data.hours,
-                    recalculated_hours,
-                );
+                let day_hours =
+                    resolve_day_hours(day_data.manual_override, day_data.hours, recalculated_hours);
                 // Manual day total overrides the computed one — scale project hours
                 // proportionally so per-project sums match the correction (same
                 // scaling as summary_projects() in web.rs).
@@ -370,7 +365,8 @@ pub fn load_sessions_for_date(date: NaiveDate, config: &Config, debug: bool) -> 
         return Vec::new();
     }
 
-    all_records.retain(|r| config.is_tracked_source(&r.project) && !config.is_source_excluded(&r.project));
+    all_records
+        .retain(|r| config.is_tracked_source(&r.project) && !config.is_source_excluded(&r.project));
     all_records.sort_by_key(|r| r.timestamp);
 
     let sessions = build_sessions_from_records(&all_records, false);
@@ -426,7 +422,8 @@ fn load_overtime_from_files(
         return result;
     }
 
-    all_records.retain(|r| config.is_tracked_source(&r.project) && !config.is_source_excluded(&r.project));
+    all_records
+        .retain(|r| config.is_tracked_source(&r.project) && !config.is_source_excluded(&r.project));
     all_records.sort_by_key(|r| r.timestamp);
 
     if debug {
@@ -593,8 +590,13 @@ fn collect_timestamps_from_file(path: &Path) -> Vec<TimestampRecord> {
                 is_t3_metadata_session = is_t3_metadata_prompt(&line);
             }
             match entry_type {
-                "system" | "file-history-snapshot" | "queue-operation"
-                | "custom-title" | "agent-name" | "last-prompt" | "pr-link" => continue,
+                "system"
+                | "file-history-snapshot"
+                | "queue-operation"
+                | "custom-title"
+                | "agent-name"
+                | "last-prompt"
+                | "pr-link" => continue,
                 _ => {}
             }
 
@@ -935,7 +937,11 @@ mod tests {
             r#"{"timestamp":"2026-07-13T09:59:16.433Z","type":"session_meta","payload":{"cwd":"/home/jarek/Programowanie/farmaster2"}}"#,
         )
         .unwrap();
-        let cwd = entry.payload.as_ref().and_then(|p| p.cwd.as_deref()).unwrap();
+        let cwd = entry
+            .payload
+            .as_ref()
+            .and_then(|p| p.cwd.as_deref())
+            .unwrap();
 
         assert_eq!(
             extract_project_from_path(cwd).as_deref(),
@@ -1023,4 +1029,3 @@ mod tests {
         );
     }
 }
-

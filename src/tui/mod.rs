@@ -7,9 +7,9 @@ use chrono::{Datelike, Local};
 use ratatui::crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{archive, config};
 use state::EditState;
@@ -46,7 +46,9 @@ fn event_loop<B: ratatui::backend::Backend>(
     loop {
         terminal.draw(|f| render::draw(f, st))?;
 
-        let Event::Key(key) = event::read()? else { continue; };
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
         if key.kind != KeyEventKind::Press {
             continue;
         }
@@ -65,7 +67,9 @@ fn event_loop<B: ratatui::backend::Backend>(
         match key.code {
             KeyCode::Char('q') => {
                 if st.dirty {
-                    st.status = "Niezapisane zmiany: 's' zapisz, 'q' wyjdź bez zapisu, inny klawisz anuluj".to_string();
+                    st.status =
+                        "Niezapisane zmiany: 's' zapisz, 'q' wyjdź bez zapisu, inny klawisz anuluj"
+                            .to_string();
                     if confirm_quit(terminal, st)? {
                         return Ok(());
                     }
@@ -76,7 +80,10 @@ fn event_loop<B: ratatui::backend::Backend>(
             KeyCode::Char('s') => {
                 let _lock = archive::lock_archive();
                 let fresh = archive::load_summary();
-                let res = { let merged = st.apply_edits(fresh); archive::save_summary(merged) };
+                let res = {
+                    let merged = st.apply_edits(fresh);
+                    archive::save_summary(merged)
+                };
                 drop(_lock);
                 st.status = match res {
                     Ok(()) => "zapisano na dysk ✓".to_string(),
@@ -100,7 +107,9 @@ fn confirm_quit<B: ratatui::backend::Backend>(
     st: &mut EditState,
 ) -> io::Result<bool> {
     terminal.draw(|f| render::draw(f, st))?;
-    let Event::Key(key) = event::read()? else { return Ok(false); };
+    let Event::Key(key) = event::read()? else {
+        return Ok(false);
+    };
     if key.kind != KeyEventKind::Press {
         return Ok(false);
     }
@@ -109,11 +118,18 @@ fn confirm_quit<B: ratatui::backend::Backend>(
         KeyCode::Char('s') => {
             let _lock = archive::lock_archive();
             let fresh = archive::load_summary();
-            let res = { let merged = st.apply_edits(fresh); archive::save_summary(merged) };
+            let res = {
+                let merged = st.apply_edits(fresh);
+                archive::save_summary(merged)
+            };
             drop(_lock);
             match res {
                 Ok(()) => Ok(true),
-                Err(e) => { st.status = format!("BŁĄD ZAPISU: {}", e); st.refresh_rows(); Ok(false) }
+                Err(e) => {
+                    st.status = format!("BŁĄD ZAPISU: {}", e);
+                    st.refresh_rows();
+                    Ok(false)
+                }
             }
         }
         _ => {

@@ -53,10 +53,7 @@ pub fn calculate_session_overtime(
     daily
 }
 
-pub fn calculate_session_regular(
-    session: &Session,
-    config: &Config,
-) -> HashMap<NaiveDate, f64> {
+pub fn calculate_session_regular(session: &Session, config: &Config) -> HashMap<NaiveDate, f64> {
     let mut daily: HashMap<NaiveDate, f64> = HashMap::new();
 
     let start_local = session
@@ -291,7 +288,10 @@ mod tests {
             other => panic!("nieoczekiwana zmiana w dzien roboczy: {:?}", other),
         };
         assert_eq!(calculate_overtime_for_day(date, start, end, &cfg), expected);
-        assert_ne!(calculate_overtime_for_day(date, start, end, &cfg), 3.0 * 3600.0);
+        assert_ne!(
+            calculate_overtime_for_day(date, start, end, &cfg),
+            3.0 * 3600.0
+        );
     }
 
     #[test]

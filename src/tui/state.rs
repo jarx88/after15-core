@@ -1,9 +1,9 @@
 // EditState i logika — uzupełniane w kolejnych taskach.
 
+use crate::archive::{DailySummaryFile, DayEntry, format_hm};
+use crate::config::Config;
 use chrono::NaiveDate;
 use std::collections::HashSet;
-use crate::archive::{format_hm, DailySummaryFile, DayEntry};
-use crate::config::Config;
 
 #[derive(Clone)]
 pub struct DayRow {
@@ -16,13 +16,22 @@ pub struct DayRow {
 }
 
 pub fn days_in_month(year: i32, month: u32) -> u32 {
-    let (ny, nm) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    let (ny, nm) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
     let first_next = NaiveDate::from_ymd_opt(ny, nm, 1).unwrap();
     let first_this = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
     first_next.signed_duration_since(first_this).num_days() as u32
 }
 
-pub fn build_rows(summary: &DailySummaryFile, year: i32, month: u32, config: &Config) -> Vec<DayRow> {
+pub fn build_rows(
+    summary: &DailySummaryFile,
+    year: i32,
+    month: u32,
+    config: &Config,
+) -> Vec<DayRow> {
     let n = days_in_month(year, month);
     let mut rows = Vec::with_capacity(n as usize);
     for d in 1..=n {
@@ -89,33 +98,53 @@ impl EditState {
     }
 
     pub fn move_up(&mut self) {
-        if self.editing.is_some() { return; }
+        if self.editing.is_some() {
+            return;
+        }
         self.cursor = self.cursor.saturating_sub(1);
     }
 
     pub fn move_down(&mut self) {
-        if self.editing.is_some() { return; }
+        if self.editing.is_some() {
+            return;
+        }
         if self.cursor + 1 < self.rows.len() {
             self.cursor += 1;
         }
     }
 
     pub fn prev_month(&mut self) {
-        if self.editing.is_some() { return; }
-        if self.month == 1 { self.year -= 1; self.month = 12; } else { self.month -= 1; }
+        if self.editing.is_some() {
+            return;
+        }
+        if self.month == 1 {
+            self.year -= 1;
+            self.month = 12;
+        } else {
+            self.month -= 1;
+        }
         self.cursor = 0;
         self.reload_rows();
     }
 
     pub fn next_month(&mut self) {
-        if self.editing.is_some() { return; }
-        if self.month == 12 { self.year += 1; self.month = 1; } else { self.month += 1; }
+        if self.editing.is_some() {
+            return;
+        }
+        if self.month == 12 {
+            self.year += 1;
+            self.month = 1;
+        } else {
+            self.month += 1;
+        }
         self.cursor = 0;
         self.reload_rows();
     }
 
     pub fn begin_edit(&mut self) {
-        if self.rows.is_empty() { return; }
+        if self.rows.is_empty() {
+            return;
+        }
         let row = &self.rows[self.cursor];
         // prefill bieżącą wartością w formacie H:MM (pusta dla nowych/wirtualnych dni)
         let prefill = if !row.existed {
@@ -147,7 +176,9 @@ impl EditState {
     }
 
     pub fn commit_edit(&mut self) {
-        let Some(buf) = self.editing.clone() else { return; };
+        let Some(buf) = self.editing.clone() else {
+            return;
+        };
         match parse_hours(&buf) {
             Ok(hours) => {
                 let row = &mut self.rows[self.cursor];
@@ -165,7 +196,9 @@ impl EditState {
                     shift: shift.clone(),
                     processed: true,
                     manual_override: false,
-                    projects: None, ..Default::default() });
+                    projects: None,
+                    ..Default::default()
+                });
                 entry.hours = hours;
                 entry.formatted = format_hm(hours);
                 entry.processed = true;
@@ -184,7 +217,9 @@ impl EditState {
     }
 
     pub fn toggle_manual(&mut self) {
-        if self.editing.is_some() || self.rows.is_empty() { return; }
+        if self.editing.is_some() || self.rows.is_empty() {
+            return;
+        }
         let row = &mut self.rows[self.cursor];
         let new_val = !row.manual_override;
         row.manual_override = new_val;
@@ -201,7 +236,9 @@ impl EditState {
             shift,
             processed: true,
             manual_override: false,
-            projects: None, ..Default::default() });
+            projects: None,
+            ..Default::default()
+        });
         entry.manual_override = new_val;
         self.dirty = true;
         self.status = if new_val {
@@ -260,7 +297,8 @@ pub fn parse_hours(input: &str) -> Result<f64, String> {
         }
         h as f64 + (m as f64) / 60.0
     } else {
-        s.parse::<f64>().map_err(|_| "zły format liczby".to_string())?
+        s.parse::<f64>()
+            .map_err(|_| "zły format liczby".to_string())?
     };
     if !(0.0..=24.0).contains(&val) {
         return Err("zakres 0-24h".to_string());
@@ -274,7 +312,15 @@ mod tests {
     use crate::archive::{DailySummaryFile, DayEntry};
 
     fn day(hours: f64, shift: &str, manual: bool) -> DayEntry {
-        DayEntry { hours, formatted: format_hm(hours), shift: shift.into(), processed: true, manual_override: manual, projects: None, ..Default::default() }
+        DayEntry {
+            hours,
+            formatted: format_hm(hours),
+            shift: shift.into(),
+            processed: true,
+            manual_override: manual,
+            projects: None,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -287,7 +333,8 @@ mod tests {
     #[test]
     fn build_rows_marks_existing_and_virtual() {
         let mut s = DailySummaryFile::default();
-        s.days.insert("2026-05-02".to_string(), day(2.0, "afternoon", true));
+        s.days
+            .insert("2026-05-02".to_string(), day(2.0, "afternoon", true));
         let rows = build_rows(&s, 2026, 5, &Config::default());
         assert_eq!(rows.len(), 31);
         let r2 = &rows[1]; // 2 maja
@@ -342,7 +389,9 @@ mod tests {
         let mut st = EditState::new(DailySummaryFile::default(), 2026, 5, Config::default());
         st.move_up(); // już na 0 — bez zmian
         assert_eq!(st.cursor, 0);
-        for _ in 0..100 { st.move_down(); }
+        for _ in 0..100 {
+            st.move_down();
+        }
         assert_eq!(st.cursor, st.rows.len() - 1);
     }
 
@@ -376,7 +425,9 @@ mod tests {
         st.cursor = 0; // 1 maja, wirtualny
         st.begin_edit();
         assert!(st.editing.is_some());
-        for c in "3:00".chars() { st.input_char(c); }
+        for c in "3:00".chars() {
+            st.input_char(c);
+        }
         st.commit_edit();
         assert!(st.editing.is_none());
         let row = &st.rows[0];
@@ -398,7 +449,9 @@ mod tests {
         st.begin_edit();
         // begin_edit prefilluje "0:00" — wyczyść i wpisz złą wartość
         st.editing = Some(String::new());
-        for c in "99".chars() { st.input_char(c); }
+        for c in "99".chars() {
+            st.input_char(c);
+        }
         st.commit_edit();
         assert!(st.editing.is_some()); // nadal edycja
         assert!(!st.dirty);
@@ -420,13 +473,29 @@ mod tests {
     fn commit_preserves_projects_of_existing_day() {
         let mut s = DailySummaryFile::default();
         let mut proj = std::collections::BTreeMap::new();
-        proj.insert("farmaster".to_string(), crate::archive::ProjectHoursEntry::default());
-        s.days.insert("2026-05-03".to_string(), DayEntry { hours: 1.0, formatted: "1:00".into(), shift: "regular".into(), processed: true, manual_override: false, projects: Some(proj), ..Default::default() });
+        proj.insert(
+            "farmaster".to_string(),
+            crate::archive::ProjectHoursEntry::default(),
+        );
+        s.days.insert(
+            "2026-05-03".to_string(),
+            DayEntry {
+                hours: 1.0,
+                formatted: "1:00".into(),
+                shift: "regular".into(),
+                processed: true,
+                manual_override: false,
+                projects: Some(proj),
+                ..Default::default()
+            },
+        );
         let mut st = EditState::new(s, 2026, 5, Config::default());
         st.cursor = 2; // 3 maja
         st.begin_edit();
         st.editing = Some(String::new());
-        for c in "2:30".chars() { st.input_char(c); }
+        for c in "2:30".chars() {
+            st.input_char(c);
+        }
         st.commit_edit();
         let e = st.summary.days.get("2026-05-03").unwrap();
         assert!((e.hours - 2.5).abs() < 1e-9);
@@ -436,7 +505,18 @@ mod tests {
     #[test]
     fn toggle_manual_on_existing_day() {
         let mut s = DailySummaryFile::default();
-        s.days.insert("2026-05-04".to_string(), DayEntry { hours: 2.0, formatted: "2:00".into(), shift: "regular".into(), processed: true, manual_override: false, projects: None, ..Default::default() });
+        s.days.insert(
+            "2026-05-04".to_string(),
+            DayEntry {
+                hours: 2.0,
+                formatted: "2:00".into(),
+                shift: "regular".into(),
+                processed: true,
+                manual_override: false,
+                projects: None,
+                ..Default::default()
+            },
+        );
         let mut st = EditState::new(s, 2026, 5, Config::default());
         st.cursor = 3;
         st.toggle_manual();
@@ -464,7 +544,9 @@ mod tests {
         let mut st = EditState::new(DailySummaryFile::default(), 2026, 5, Config::default());
         st.begin_edit();
         st.editing = Some(String::new());
-        for c in "4:00".chars() { st.input_char(c); }
+        for c in "4:00".chars() {
+            st.input_char(c);
+        }
         st.commit_edit(); // 1 maja = 4h
         st.apply_edits(DailySummaryFile::default());
         assert!((st.summary.months.get("2026-05").unwrap().total_hours - 4.0).abs() < 1e-9);
@@ -474,18 +556,25 @@ mod tests {
     #[test]
     fn commit_edit_on_existing_day_overwrites_and_preserves_shift_processed() {
         let mut s = DailySummaryFile::default();
-        s.days.insert("2026-05-05".to_string(), DayEntry {
-            hours: 1.0,
-            formatted: "1:00".into(),
-            shift: "afternoon".into(),
-            processed: true,
-            manual_override: false,
-            projects: None, ..Default::default() });
+        s.days.insert(
+            "2026-05-05".to_string(),
+            DayEntry {
+                hours: 1.0,
+                formatted: "1:00".into(),
+                shift: "afternoon".into(),
+                processed: true,
+                manual_override: false,
+                projects: None,
+                ..Default::default()
+            },
+        );
         let mut st = EditState::new(s, 2026, 5, Config::default());
         st.cursor = 4; // 5 maja (index 4)
         st.begin_edit();
         st.editing = Some(String::new());
-        for c in "2:30".chars() { st.input_char(c); }
+        for c in "2:30".chars() {
+            st.input_char(c);
+        }
         st.commit_edit();
         let e = st.summary.days.get("2026-05-05").unwrap();
         assert!((e.hours - 2.5).abs() < 1e-9);
@@ -506,24 +595,42 @@ mod tests {
         st.cursor = 0; // 1 maja
         st.begin_edit();
         st.editing = Some(String::new());
-        for c in "3:00".chars() { st.input_char(c); }
+        for c in "3:00".chars() {
+            st.input_char(c);
+        }
         st.commit_edit();
 
         // "concurrent writer" wrote day 20 but NOT day 1
         let mut fresh = DailySummaryFile::default();
-        fresh.days.insert("2026-05-20".to_string(), DayEntry {
-            hours: 2.0,
-            formatted: "2:00".into(),
-            shift: "regular".into(),
-            processed: true,
-            manual_override: false,
-            projects: None, ..Default::default() });
+        fresh.days.insert(
+            "2026-05-20".to_string(),
+            DayEntry {
+                hours: 2.0,
+                formatted: "2:00".into(),
+                shift: "regular".into(),
+                processed: true,
+                manual_override: false,
+                projects: None,
+                ..Default::default()
+            },
+        );
 
         st.apply_edits(fresh);
 
-        let e01 = st.summary.days.get("2026-05-01").expect("edit day 1 must be present");
+        let e01 = st
+            .summary
+            .days
+            .get("2026-05-01")
+            .expect("edit day 1 must be present");
         assert!((e01.hours - 3.0).abs() < 1e-9, "edited day should be 3h");
-        let e20 = st.summary.days.get("2026-05-20").expect("concurrent day 20 must be present");
-        assert!((e20.hours - 2.0).abs() < 1e-9, "concurrent day should be 2h");
+        let e20 = st
+            .summary
+            .days
+            .get("2026-05-20")
+            .expect("concurrent day 20 must be present");
+        assert!(
+            (e20.hours - 2.0).abs() < 1e-9,
+            "concurrent day should be 2h"
+        );
     }
 }

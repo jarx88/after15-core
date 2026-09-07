@@ -1,11 +1,19 @@
 use after15::{archive, config, jsonl, pdf, web};
-use axum::{body::{to_bytes, Body}, http::{Request, StatusCode}};
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, StatusCode},
+};
 use chrono::{NaiveDate, NaiveDateTime};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{collections::HashMap, fs};
 use tower::ServiceExt;
 
-async fn request(app: &axum::Router, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+async fn request(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
     let mut builder = Request::builder().method(method).uri(uri);
     let body = if let Some(value) = body {
         builder = builder.header("content-type", "application/json");
@@ -13,7 +21,11 @@ async fn request(app: &axum::Router, method: &str, uri: &str, body: Option<Value
     } else {
         Body::empty()
     };
-    let response = app.clone().oneshot(builder.body(body).unwrap()).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap();
     let status = response.status();
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let value = serde_json::from_slice(&bytes)
@@ -46,9 +58,14 @@ async fn web_contract_and_mutations_are_isolated() {
     // config.json musi istniec zanim router() zawola load_config()
     let config_dir = root.join("config/after15");
     fs::create_dir_all(&config_dir).unwrap();
-    fs::write(config_dir.join("config.json"), serde_json::to_vec_pretty(&json!({
-        "billing": {"b2b_from": "2026-09-02", "git_author_email": "git@jarx.pl"}
-    })).unwrap()).unwrap();
+    fs::write(
+        config_dir.join("config.json"),
+        serde_json::to_vec_pretty(&json!({
+            "billing": {"b2b_from": "2026-09-02", "git_author_email": "git@jarx.pl"}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 
     let app = web::router();
     let (status, month) = request(&app, "GET", "/api/month/2026-07", None).await;
@@ -74,45 +91,98 @@ async fn web_contract_and_mutations_are_isolated() {
     assert_eq!(projects["overtime_pln"], projects["earned_pln"]);
     assert_eq!(projects["projects"][0]["b2b_pln"], 0.0);
 
-    for uri in ["/api/month/2026-13", "/api/day/2026-02-30", "/api/report/nope.pdf"] {
-        assert_eq!(request(&app, "GET", uri, None).await.0, StatusCode::BAD_REQUEST);
+    for uri in [
+        "/api/month/2026-13",
+        "/api/day/2026-02-30",
+        "/api/report/nope.pdf",
+    ] {
+        assert_eq!(
+            request(&app, "GET", uri, None).await.0,
+            StatusCode::BAD_REQUEST
+        );
     }
-    assert_eq!(request(&app, "PUT", "/api/day/2026-07-03", Some(json!({"hours":"25:00"}))).await.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        request(
+            &app,
+            "PUT",
+            "/api/day/2026-07-03",
+            Some(json!({"hours":"25:00"}))
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
 
     let mut writes = Vec::new();
     for day in 3..=8 {
         let app = app.clone();
         writes.push(tokio::spawn(async move {
-            request(&app, "PUT", &format!("/api/day/2026-07-{day:02}"), Some(json!({"hours":"1:30"}))).await.0
+            request(
+                &app,
+                "PUT",
+                &format!("/api/day/2026-07-{day:02}"),
+                Some(json!({"hours":"1:30"})),
+            )
+            .await
+            .0
         }));
     }
-    for write in writes { assert_eq!(write.await.unwrap(), StatusCode::OK); }
+    for write in writes {
+        assert_eq!(write.await.unwrap(), StatusCode::OK);
+    }
     let summary = archive::load_summary_checked().unwrap();
-    for day in 3..=8 { assert_eq!(summary.days[&format!("2026-07-{day:02}")].hours, 1.5); }
+    for day in 3..=8 {
+        assert_eq!(summary.days[&format!("2026-07-{day:02}")].hours, 1.5);
+    }
 
-    assert_eq!(request(&app, "DELETE", "/api/day/2026-07-03/override", None).await.0, StatusCode::OK);
+    assert_eq!(
+        request(&app, "DELETE", "/api/day/2026-07-03/override", None)
+            .await
+            .0,
+        StatusCode::OK
+    );
     let restored = archive::load_summary_checked().unwrap();
     let day = &restored.days["2026-07-03"];
     assert_eq!(day.hours, 0.0);
     assert!(!day.manual_override);
-    assert!(day.projects.as_ref().is_some_and(|projects| projects.is_empty()));
+    assert!(
+        day.projects
+            .as_ref()
+            .is_some_and(|projects| projects.is_empty())
+    );
 
-    assert_eq!(request(&app, "POST", "/api/day/2026-07-09/lock", None).await.0, StatusCode::OK);
+    assert_eq!(
+        request(&app, "POST", "/api/day/2026-07-09/lock", None)
+            .await
+            .0,
+        StatusCode::OK
+    );
     assert!(archive::load_summary_checked().unwrap().days["2026-07-09"].manual_override);
 
-    assert_eq!(request(&app, "POST", "/api/rebuild", None).await.0, StatusCode::OK);
+    assert_eq!(
+        request(&app, "POST", "/api/rebuild", None).await.0,
+        StatusCode::OK
+    );
     assert!(archive::load_summary_checked().unwrap().days["2026-07-01"].manual_override);
-    assert!(archive::load_summary_checked().unwrap().days.contains_key("2026-07-02"));
+    assert!(
+        archive::load_summary_checked()
+            .unwrap()
+            .days
+            .contains_key("2026-07-02")
+    );
 
     let session = jsonl::Session {
-        id: "test".into(), project: "test".into(), project_counts: HashMap::new(),
+        id: "test".into(),
+        project: "test".into(),
+        project_counts: HashMap::new(),
         start_time: NaiveDateTime::parse_from_str("2026-07-01 21:30:00", "%F %T").unwrap(),
         end_time: NaiveDateTime::parse_from_str("2026-07-01 23:30:00", "%F %T").unwrap(),
         duration_seconds: 7200,
         has_claude: true,
         has_codex: false,
     };
-    let clipped = web::clip_session_to_date(&session, NaiveDate::from_ymd_opt(2026, 7, 2).unwrap()).unwrap();
+    let clipped =
+        web::clip_session_to_date(&session, NaiveDate::from_ymd_opt(2026, 7, 2).unwrap()).unwrap();
     assert_eq!(clipped.duration_seconds, 5400);
 
     // --- B2B: etykieta zmiany i stawka dnia w odpowiedzi miesiaca ---
@@ -128,8 +198,19 @@ async fn web_contract_and_mutations_are_isolated() {
     let mut summary = archive::load_summary_checked().unwrap();
     for (date, hours) in [("2026-09-01", 2.0), ("2026-09-02", 3.0)] {
         let day = archive::day_entry(
-            NaiveDate::parse_from_str(date, "%F").unwrap(), hours, None, false, &cfg);
-        summary.days.insert(date.to_string(), archive::DayEntry { manual_override: true, ..day });
+            NaiveDate::parse_from_str(date, "%F").unwrap(),
+            hours,
+            None,
+            false,
+            &cfg,
+        );
+        summary.days.insert(
+            date.to_string(),
+            archive::DayEntry {
+                manual_override: true,
+                ..day
+            },
+        );
     }
     archive::save_summary(&summary).unwrap();
 
@@ -143,22 +224,49 @@ async fn web_contract_and_mutations_are_isolated() {
     assert_eq!(day_of("2026-09-02")["pln"].as_f64().unwrap(), 3.0 * 140.0);
     assert_eq!(sept["rates"]["b2b_pln"], 140.0);
     // kubelek "bez przypisania" tylko na dniach B2B — stare miesiace wygladaja jak dotad
-    assert!(day_of("2026-09-02")["projects"].as_array().unwrap()
-        .iter().any(|p| p["name"] == "bez przypisania"));
-    assert!(july["days"].as_array().unwrap().iter()
-        .find(|d| d["date"] == "2026-07-02").unwrap()["projects"].as_array().unwrap().is_empty());
+    assert!(
+        day_of("2026-09-02")["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "bez przypisania")
+    );
+    assert!(
+        july["days"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["date"] == "2026-07-02")
+            .unwrap()["projects"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(sept["b2b_from"], "2026-09-02");
 
     // --- R1: dzien B2B z reczna korekta i bez mapy projektow trafia na fakture ---
     let alpha = HashMap::from([(
         "-home-jarek-Programowanie-alpha".to_string(),
-        jsonl::ProjectHours { weekday_hours: 4.0, ..Default::default() },
+        jsonl::ProjectHours {
+            weekday_hours: 4.0,
+            ..Default::default()
+        },
     )]);
     let mut summary = archive::load_summary_checked().unwrap();
     let with_projects = archive::day_entry(
-        NaiveDate::parse_from_str("2026-09-03", "%F").unwrap(), 4.0, Some(&alpha), false, &cfg);
-    summary.days.insert("2026-09-03".to_string(),
-        archive::DayEntry { manual_override: true, ..with_projects });
+        NaiveDate::parse_from_str("2026-09-03", "%F").unwrap(),
+        4.0,
+        Some(&alpha),
+        false,
+        &cfg,
+    );
+    summary.days.insert(
+        "2026-09-03".to_string(),
+        archive::DayEntry {
+            manual_override: true,
+            ..with_projects
+        },
+    );
     archive::save_summary(&summary).unwrap();
 
     let (status, invoice) = request(&app, "GET", "/api/invoice/2026-09/summaries", None).await;
@@ -172,7 +280,10 @@ async fn web_contract_and_mutations_are_isolated() {
 
     // suma faktury = suma dni B2B z widoku miesiaca
     let (_, sept) = request(&app, "GET", "/api/month/2026-09", None).await;
-    let b2b_pln: f64 = sept["days"].as_array().unwrap().iter()
+    let b2b_pln: f64 = sept["days"]
+        .as_array()
+        .unwrap()
+        .iter()
         .filter(|d| d["shift"] == "b2b")
         .map(|d| d["pln"].as_f64().unwrap())
         .sum();
@@ -190,34 +301,79 @@ fn invoice_rows_count_only_b2b_days_and_keep_unassigned_hours() {
         r#"{"billing":{"b2b_from":"2026-09-02"},"projects":{"tracked_path":"Programowanie","excluded_projects":["gamma"]}}"#,
     ).unwrap();
     let hours = |weekday: f64, weekend: f64| jsonl::ProjectHours {
-        weekday_hours: weekday, weekend_hours: weekend, ..Default::default()
+        weekday_hours: weekday,
+        weekend_hours: weekend,
+        ..Default::default()
     };
     let day = |d: &str| NaiveDate::parse_from_str(d, "%F").unwrap();
     let days = vec![
         // przed przejsciem — nie wchodzi do zalacznika
-        (day("2026-09-01"), 2.0, HashMap::from([
-            ("-home-jarek-Programowanie-alpha".to_string(), hours(2.0, 0.0)),
-        ])),
-        (day("2026-09-02"), 5.0, HashMap::from([
-            ("-home-jarek-Programowanie-alpha".to_string(), hours(3.0, 0.0)),
-            ("-home-jarek-Programowanie-beta".to_string(), hours(1.5, 0.0)),
-        ])),
+        (
+            day("2026-09-01"),
+            2.0,
+            HashMap::from([(
+                "-home-jarek-Programowanie-alpha".to_string(),
+                hours(2.0, 0.0),
+            )]),
+        ),
+        (
+            day("2026-09-02"),
+            5.0,
+            HashMap::from([
+                (
+                    "-home-jarek-Programowanie-alpha".to_string(),
+                    hours(3.0, 0.0),
+                ),
+                (
+                    "-home-jarek-Programowanie-beta".to_string(),
+                    hours(1.5, 0.0),
+                ),
+            ]),
+        ),
         // reczna korekta bez mapy projektow — godziny musza trafic na fakture
         (day("2026-09-03"), 1.0, HashMap::new()),
         // projekt z excluded_projects wypada z faktury razem ze swoimi godzinami
-        (day("2026-09-04"), 9.0, HashMap::from([
-            ("-home-jarek-Programowanie-gamma".to_string(), hours(9.0, 0.0)),
-        ])),
-        (day("2026-09-05"), 2.0, HashMap::from([
-            ("-home-jarek-Programowanie-alpha".to_string(), hours(0.0, 2.0)),
-        ])),
+        (
+            day("2026-09-04"),
+            9.0,
+            HashMap::from([(
+                "-home-jarek-Programowanie-gamma".to_string(),
+                hours(9.0, 0.0),
+            )]),
+        ),
+        (
+            day("2026-09-05"),
+            2.0,
+            HashMap::from([(
+                "-home-jarek-Programowanie-alpha".to_string(),
+                hours(0.0, 2.0),
+            )]),
+        ),
     ];
 
     let rows = web::invoice_rows(&days, &config);
-    assert_eq!(rows, vec![
-        pdf::InvoiceRow { project: "alpha".into(), hours: 5.0, amount: 700.0, summary: None },
-        pdf::InvoiceRow { project: "beta".into(), hours: 1.5, amount: 210.0, summary: None },
-        // 1.0 z dnia bez projektow + 0.5 nieprzypisane z 2026-09-02 (5.0 - 3.0 - 1.5)
-        pdf::InvoiceRow { project: "bez przypisania".into(), hours: 1.5, amount: 210.0, summary: None },
-    ]);
+    assert_eq!(
+        rows,
+        vec![
+            pdf::InvoiceRow {
+                project: "alpha".into(),
+                hours: 5.0,
+                amount: 700.0,
+                summary: None
+            },
+            pdf::InvoiceRow {
+                project: "beta".into(),
+                hours: 1.5,
+                amount: 210.0,
+                summary: None
+            },
+            // 1.0 z dnia bez projektow + 0.5 nieprzypisane z 2026-09-02 (5.0 - 3.0 - 1.5)
+            pdf::InvoiceRow {
+                project: "bez przypisania".into(),
+                hours: 1.5,
+                amount: 210.0,
+                summary: None
+            },
+        ]
+    );
 }

@@ -45,7 +45,11 @@ pub fn rebuild_archive(
             continue;
         }
         let key = date.format("%Y-%m-%d").to_string();
-        if summary.days.get(&key).is_some_and(|day| day.manual_override) {
+        if summary
+            .days
+            .get(&key)
+            .is_some_and(|day| day.manual_override)
+        {
             continue;
         }
         // Notes survive a rebuild even though the entry is rewritten.

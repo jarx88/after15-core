@@ -259,6 +259,9 @@ mod tests {
         assert_eq!(shift_str(ShiftType::Regular), "regular");
         assert_eq!(shift_str(ShiftType::Afternoon), "afternoon");
         assert_eq!(shift_str(ShiftType::Weekend), "weekend");
-        assert_eq!(shift_str(ShiftType::SaturdayAfternoon), "saturday_afternoon");
+        assert_eq!(
+            shift_str(ShiftType::SaturdayAfternoon),
+            "saturday_afternoon"
+        );
     }
 }

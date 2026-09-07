@@ -553,10 +553,22 @@ pub struct InvoiceRow {
 fn deaccent(text: &str) -> String {
     text.chars()
         .map(|c| match c {
-            'ą' => 'a', 'ć' => 'c', 'ę' => 'e', 'ł' => 'l', 'ń' => 'n',
-            'ó' => 'o', 'ś' => 's', 'ź' | 'ż' => 'z',
-            'Ą' => 'A', 'Ć' => 'C', 'Ę' => 'E', 'Ł' => 'L', 'Ń' => 'N',
-            'Ó' => 'O', 'Ś' => 'S', 'Ź' | 'Ż' => 'Z',
+            'ą' => 'a',
+            'ć' => 'c',
+            'ę' => 'e',
+            'ł' => 'l',
+            'ń' => 'n',
+            'ó' => 'o',
+            'ś' => 's',
+            'ź' | 'ż' => 'z',
+            'Ą' => 'A',
+            'Ć' => 'C',
+            'Ę' => 'E',
+            'Ł' => 'L',
+            'Ń' => 'N',
+            'Ó' => 'O',
+            'Ś' => 'S',
+            'Ź' | 'Ż' => 'Z',
             other => other,
         })
         .collect()
@@ -603,7 +615,14 @@ pub fn generate_invoice_attachment(
 
     let mut y = PAGE_H - MARGIN;
     let header_height = 25.0;
-    draw_rect(&layer, MARGIN, y - header_height, PAGE_W - 2.0 * MARGIN, header_height, PRIMARY);
+    draw_rect(
+        &layer,
+        MARGIN,
+        y - header_height,
+        PAGE_W - 2.0 * MARGIN,
+        header_height,
+        PRIMARY,
+    );
     layer.set_fill_color(Color::Rgb(Rgb::new(WHITE.0, WHITE.1, WHITE.2, None)));
     layer.use_text(
         &deaccent(&format!("Zalacznik do faktury za {month_num:02}/{year}")),
@@ -616,7 +635,12 @@ pub fn generate_invoice_attachment(
 
     let total_hours: f64 = rows.iter().map(|row| row.hours).sum();
     let total_amount: f64 = rows.iter().map(|row| row.amount).sum();
-    layer.set_fill_color(Color::Rgb(Rgb::new(TEXT_DARK.0, TEXT_DARK.1, TEXT_DARK.2, None)));
+    layer.set_fill_color(Color::Rgb(Rgb::new(
+        TEXT_DARK.0,
+        TEXT_DARK.1,
+        TEXT_DARK.2,
+        None,
+    )));
     layer.use_text(
         &deaccent(&format!(
             "Razem: {} h x {:.0} PLN/h = {:.2} PLN netto",
@@ -638,11 +662,28 @@ pub fn generate_invoice_attachment(
             layer = doc.get_page(page).get_layer(next);
             y = PAGE_H - MARGIN;
         }
-        draw_rect(&layer, MARGIN, y - 8.0, PAGE_W - 2.0 * MARGIN, 8.0, HEADER_BG);
+        draw_rect(
+            &layer,
+            MARGIN,
+            y - 8.0,
+            PAGE_W - 2.0 * MARGIN,
+            8.0,
+            HEADER_BG,
+        );
         layer.set_fill_color(Color::Rgb(Rgb::new(WHITE.0, WHITE.1, WHITE.2, None)));
-        layer.use_text(&deaccent(&truncate(&row.project, 45)), 10.0, Mm(MARGIN + 3.0), Mm(y - 5.5), &font_bold);
         layer.use_text(
-            &deaccent(&format!("{} h - {:.2} PLN", format_hours(row.hours), row.amount)),
+            &deaccent(&truncate(&row.project, 45)),
+            10.0,
+            Mm(MARGIN + 3.0),
+            Mm(y - 5.5),
+            &font_bold,
+        );
+        layer.use_text(
+            &deaccent(&format!(
+                "{} h - {:.2} PLN",
+                format_hours(row.hours),
+                row.amount
+            )),
             10.0,
             Mm(PAGE_W - MARGIN - 55.0),
             Mm(y - 5.5),
@@ -650,13 +691,26 @@ pub fn generate_invoice_attachment(
         );
         y -= 12.0;
 
-        layer.set_fill_color(Color::Rgb(Rgb::new(TEXT_DARK.0, TEXT_DARK.1, TEXT_DARK.2, None)));
-        let text = row.summary.as_deref().unwrap_or("(brak podsumowania - wygeneruj przyciskiem Opisy do FV)");
+        layer.set_fill_color(Color::Rgb(Rgb::new(
+            TEXT_DARK.0,
+            TEXT_DARK.1,
+            TEXT_DARK.2,
+            None,
+        )));
+        let text = row
+            .summary
+            .as_deref()
+            .unwrap_or("(brak podsumowania - wygeneruj przyciskiem Opisy do FV)");
         for line in wrap(&deaccent(text), 100) {
             if y < MARGIN + 8.0 {
                 let (page, next) = doc.add_page(Mm(PAGE_W), Mm(PAGE_H), "Layer 1");
                 layer = doc.get_page(page).get_layer(next);
-                layer.set_fill_color(Color::Rgb(Rgb::new(TEXT_DARK.0, TEXT_DARK.1, TEXT_DARK.2, None)));
+                layer.set_fill_color(Color::Rgb(Rgb::new(
+                    TEXT_DARK.0,
+                    TEXT_DARK.1,
+                    TEXT_DARK.2,
+                    None,
+                )));
                 y = PAGE_H - MARGIN;
             }
             layer.use_text(&line, 9.0, Mm(MARGIN + 3.0), Mm(y), &font_regular);
@@ -667,7 +721,10 @@ pub fn generate_invoice_attachment(
 
     layer.set_fill_color(Color::Rgb(Rgb::new(0.5, 0.5, 0.5, None)));
     layer.use_text(
-        &format!("Wygenerowano: {}", chrono::Local::now().format("%Y-%m-%d %H:%M")),
+        &format!(
+            "Wygenerowano: {}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M")
+        ),
         8.0,
         Mm(MARGIN),
         Mm(MARGIN.max(y)),
@@ -677,7 +734,8 @@ pub fn generate_invoice_attachment(
     let output_path = dirs::home_dir()
         .unwrap_or_default()
         .join(format!("zalacznik_fv_{month}.pdf"));
-    let file = File::create(&output_path).map_err(|e| format!("Nie mozna utworzyc pliku: {}", e))?;
+    let file =
+        File::create(&output_path).map_err(|e| format!("Nie mozna utworzyc pliku: {}", e))?;
     doc.save(&mut BufWriter::new(file))
         .map_err(|e| format!("Blad zapisu PDF: {}", e))?;
     Ok(output_path)
@@ -702,16 +760,27 @@ mod tests {
         };
         let name = "-home-jarek-Programowanie-alpha".to_string();
         let daily = HashMap::from([
-            (day("2026-09-01"), HashMap::from([(name.clone(), hours(2.0, 0.0))])),
-            (day("2026-09-02"), HashMap::from([(name.clone(), hours(3.0, 0.0))])),
-            (day("2026-09-05"), HashMap::from([(name.clone(), hours(0.0, 1.0))])),
+            (
+                day("2026-09-01"),
+                HashMap::from([(name.clone(), hours(2.0, 0.0))]),
+            ),
+            (
+                day("2026-09-02"),
+                HashMap::from([(name.clone(), hours(3.0, 0.0))]),
+            ),
+            (
+                day("2026-09-05"),
+                HashMap::from([(name.clone(), hours(0.0, 1.0))]),
+            ),
         ]);
         let dates = vec![day("2026-09-01"), day("2026-09-02"), day("2026-09-05")];
 
         let totals = calculate_project_totals(&daily, &dates, &config);
         let alpha = &totals["alpha"];
         // 2 h sprzed przejscia po starej stawce + 3 h B2B po 140
-        assert!((alpha.weekday_pln - (2.0 * config.overtime_rate_weekday() + 3.0 * 140.0)).abs() < 1e-6);
+        assert!(
+            (alpha.weekday_pln - (2.0 * config.overtime_rate_weekday() + 3.0 * 140.0)).abs() < 1e-6
+        );
         // sobota juz po przejsciu: 140, a nie stawka weekendowa z pensji
         assert!((alpha.weekend_pln - 140.0).abs() < 1e-6);
     }

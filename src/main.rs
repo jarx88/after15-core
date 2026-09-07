@@ -36,10 +36,16 @@ struct Cli {
     #[arg(long, help = "Send daily_summary.json backup via Telegram")]
     backup: bool,
 
-    #[arg(long, help = "Pokaż sumę godzin per projekt od początku bieżącego roku")]
+    #[arg(
+        long,
+        help = "Pokaż sumę godzin per projekt od początku bieżącego roku"
+    )]
     project_totals: bool,
 
-    #[arg(long, help = "Z --project-totals: uwzględnij także godziny w ramach godzin pracy")]
+    #[arg(
+        long,
+        help = "Z --project-totals: uwzględnij także godziny w ramach godzin pracy"
+    )]
     full: bool,
 
     #[arg(long, help = "Interaktywna edycja dni (TUI)")]
@@ -768,7 +774,7 @@ fn build_telegram_month_table(
                 return (
                     month_filter.unwrap_or("bieżący miesiąc").to_string(),
                     format!("Brak danych: {}", err),
-                )
+                );
             }
         };
 
