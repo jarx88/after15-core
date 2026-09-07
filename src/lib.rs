@@ -5,6 +5,7 @@ pub mod overtime;
 pub mod pdf;
 pub mod report;
 pub mod schedule;
+pub mod telegram;
 pub mod tui;
 pub mod web;
 

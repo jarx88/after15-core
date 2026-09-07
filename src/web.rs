@@ -1004,6 +1004,10 @@ fn daily_archive_tick() {
 async fn auto_summary_loop() {
     loop {
         let _ = tokio::task::spawn_blocking(daily_archive_tick).await;
+        let _ = tokio::task::spawn_blocking(|| {
+            crate::telegram::auto_daily_backup(&config::load_config())
+        })
+        .await;
         let date = today() - Duration::days(1);
         let task =
             tokio::task::spawn_blocking(move || ensure_git_summary(date, &config::load_config()));

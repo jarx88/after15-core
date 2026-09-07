@@ -1,10 +1,8 @@
 use chrono::{Datelike, Local};
 use clap::Parser;
-use fs2::FileExt;
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
 
-use after15::{archive, config, jsonl, overtime, pdf, report, schedule, tui, web};
+use after15::{archive, config, jsonl, overtime, pdf, report, schedule, telegram, tui, web};
 
 use report::format_hm;
 
@@ -88,7 +86,7 @@ fn main() {
     }
 
     if cli.backup {
-        send_telegram_backup(&config);
+        exit_on_telegram_error(telegram::send_backup(&config));
         return;
     }
 
@@ -112,7 +110,7 @@ fn main() {
                     }
                 }
                 archive::archive_overtime(&daily_hours, &daily_projects, &config, false);
-                auto_telegram_backup(&config);
+                telegram::auto_daily_backup(&config);
                 archive::mark_daily_archive_done();
             }
         }
@@ -128,7 +126,7 @@ fn main() {
         return;
     }
 
-    auto_telegram_backup(&config);
+    telegram::auto_daily_backup(&config);
 
     if let Some(explain_date_str) = &cli.explain {
         match chrono::NaiveDate::parse_from_str(explain_date_str, "%Y-%m-%d") {
@@ -183,7 +181,7 @@ fn main() {
                 );
                 send_telegram_message(&message, &config);
                 let caption = format!("📄 Raport PDF nadgodzin\n📅 {}", month_label);
-                send_telegram_file(&path, &caption, &config, true);
+                exit_on_telegram_error(telegram::send_file(&path, &caption, &config));
             }
             Err(e) => {
                 eprintln!("[BLAD] {}", e);
@@ -518,136 +516,12 @@ fn print_explain(date: chrono::NaiveDate, debug: bool) {
     );
 }
 
-
-fn auto_telegram_backup(config: &config::Config) {
-    if !config.telegram.is_configured() {
-        return;
+/// CLI: błąd wysyłki kończy program z kodem 1.
+fn exit_on_telegram_error(result: Result<(), String>) {
+    if let Err(message) = result {
+        eprintln!("[BŁĄD] {message}");
+        std::process::exit(1);
     }
-
-    let Some(_telegram_lock) = lock_telegram_backup() else {
-        return;
-    };
-
-    let marker_path = dirs::data_dir()
-        .or_else(|| dirs::home_dir().map(|p| p.join(".local/share")))
-        .map(|p| p.join("claude-overtime/.telegram_last_backup"));
-
-    let Some(marker) = marker_path else { return };
-
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-
-    if marker.exists() {
-        if let Ok(content) = std::fs::read_to_string(&marker) {
-            if content.trim() == today {
-                return;
-            }
-        }
-    }
-
-    if send_telegram_backup_silent(config) {
-        if let Some(parent) = marker.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&marker, &today);
-    }
-}
-
-fn lock_telegram_backup() -> Option<File> {
-    let lock_path = dirs::data_dir()
-        .or_else(|| dirs::home_dir().map(|p| p.join(".local/share")))
-        .map(|p| p.join("claude-overtime/.telegram_backup.lock"))?;
-
-    if let Some(parent) = lock_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(&lock_path)
-        .ok()?;
-
-    file.try_lock_exclusive().ok()?;
-    Some(file)
-}
-
-fn send_telegram_file(
-    path: &std::path::Path,
-    caption: &str,
-    config: &config::Config,
-    exit_on_error: bool,
-) -> bool {
-    use std::process::Command;
-
-    if !config.telegram.is_configured() {
-        if exit_on_error {
-            eprintln!("[BŁĄD] Telegram nie skonfigurowany w ~/.config/after15/config.json");
-            eprintln!(
-                "Dodaj sekcję: \"telegram\": {{ \"bot_token\": \"...\", \"chat_id\": \"...\" }}"
-            );
-            std::process::exit(1);
-        }
-        return false;
-    }
-
-    if !path.exists() {
-        if exit_on_error {
-            eprintln!("[BŁĄD] Plik nie istnieje: {}", path.display());
-            std::process::exit(1);
-        }
-        return false;
-    }
-
-    let url = format!(
-        "https://api.telegram.org/bot{}/sendDocument",
-        config.telegram.bot_token
-    );
-
-    let output = Command::new("curl")
-        .args([
-            "-s",
-            "--connect-timeout",
-            "5",
-            "-X",
-            "POST",
-            &url,
-            "-F",
-            &format!("chat_id={}", config.telegram.chat_id),
-            "-F",
-            &format!("document=@{}", path.display()),
-            "-F",
-            &format!("caption={}", caption),
-        ])
-        .output();
-
-    match output {
-        Ok(result) => {
-            if result.status.success() {
-                let body = String::from_utf8_lossy(&result.stdout);
-                if body.contains("\"ok\":true") {
-                    eprintln!("Wysłano na Telegram: {}", path.display());
-                    return true;
-                } else if exit_on_error {
-                    eprintln!("[BŁĄD] Telegram API zwrócił błąd: {}", body);
-                    std::process::exit(1);
-                }
-            } else if exit_on_error {
-                eprintln!(
-                    "[BŁĄD] curl zakończył się błędem: {}",
-                    String::from_utf8_lossy(&result.stderr)
-                );
-                std::process::exit(1);
-            }
-        }
-        Err(e) => {
-            if exit_on_error {
-                eprintln!("[BŁĄD] Nie można uruchomić curl: {}", e);
-                eprintln!("Zainstaluj curl: sudo apt install curl");
-                std::process::exit(1);
-            }
-        }
-    }
-    false
 }
 
 fn send_telegram_message(message: &str, config: &config::Config) {
@@ -834,63 +708,4 @@ fn truncate_str(value: &str, max_len: usize) -> String {
     } else {
         format!("{}...", value.chars().take(max_len - 3).collect::<String>())
     }
-}
-
-fn send_telegram_backup_silent(config: &config::Config) -> bool {
-    let summary_path = dirs::data_dir()
-        .or_else(|| dirs::home_dir().map(|p| p.join(".local/share")))
-        .map(|p| p.join("claude-overtime/daily_summary.json"));
-
-    let Some(path) = summary_path else {
-        return false;
-    };
-
-    if !path.exists() {
-        return false;
-    }
-
-    let summary = archive::load_summary();
-    let days_count = summary.days.len();
-    let file_size = std::fs::metadata(&path)
-        .map(|m| {
-            let kb = m.len() as f64 / 1024.0;
-            format!("{:.1} KB", kb)
-        })
-        .unwrap_or_else(|_| "?".to_string());
-    let date_now = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
-
-    let caption = format!(
-        "\u{1F4E6} Backup daily_summary.json\n\u{1F4C5} {}\n\u{1F4CA} Dni: {} | Rozmiar: {}",
-        date_now, days_count, file_size
-    );
-
-    send_telegram_file(&path, &caption, config, false)
-}
-
-fn send_telegram_backup(config: &config::Config) {
-    let summary_path = dirs::data_dir()
-        .or_else(|| dirs::home_dir().map(|p| p.join(".local/share")))
-        .map(|p| p.join("claude-overtime/daily_summary.json"));
-
-    let Some(path) = summary_path else {
-        eprintln!("[BŁĄD] Nie można znaleźć daily_summary.json");
-        std::process::exit(1);
-    };
-
-    let summary = archive::load_summary();
-    let days_count = summary.days.len();
-    let file_size = std::fs::metadata(&path)
-        .map(|m| {
-            let kb = m.len() as f64 / 1024.0;
-            format!("{:.1} KB", kb)
-        })
-        .unwrap_or_else(|_| "?".to_string());
-    let date_now = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
-
-    let caption = format!(
-        "\u{1F4E6} Backup daily_summary.json\n\u{1F4C5} {}\n\u{1F4CA} Dni: {} | Rozmiar: {}",
-        date_now, days_count, file_size
-    );
-
-    send_telegram_file(&path, &caption, config, true);
 }
