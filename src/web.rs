@@ -50,7 +50,9 @@ pub fn router() -> Router {
         .route("/api/invoice/{month}", get(get_invoice))
         .route(
             "/api/invoice/{month}/summaries",
-            get(get_invoice_summaries).post(post_invoice_summaries),
+            get(get_invoice_summaries)
+                .post(post_invoice_summaries)
+                .put(put_invoice_summary),
         )
         .with_state(AppState {
             config: Arc::new(std::sync::RwLock::new(config::load_config())),
@@ -1491,6 +1493,44 @@ async fn post_invoice_summaries(
         let config = state.config();
         let (rows, errors) = invoice_data(&month, first, &config, true)?;
         Ok(Json(invoice_response(month, rows, errors, &config)))
+    })
+    .await
+    .map_err(join_error)?
+}
+
+#[derive(Deserialize)]
+struct InvoiceSummaryInput {
+    project: String,
+    summary: String,
+}
+
+/// Ręczna korekta opisu do załącznika. Zapis pod fingerprintem bieżącego zestawu
+/// commitów, więc PDF i GET widzą korektę tak samo jak tekst z AI; nowe commity
+/// w tym repo unieważnią ją, jak każdy opis.
+async fn put_invoice_summary(
+    State(state): State<AppState>,
+    Path(month): Path<String>,
+    Json(input): Json<InvoiceSummaryInput>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let first = parse_month(&month)?;
+    let summary = input.summary.trim().to_string();
+    if summary.is_empty() || summary.len() > 4000 {
+        return Err(bad_request("opis (1–4000 znaków)", &input.project));
+    }
+    tokio::task::spawn_blocking(move || {
+        let config = state.config();
+        let Some((from, to)) = b2b_month_range(first, &config) else {
+            return Err(bad_request("miesiąc — brak dni B2B", &month));
+        };
+        let author = config.git_author_for(from);
+        let git = collect_git_range(from, to, author, "%Y-%m-%d %H:%M", &config)?;
+        let project = git
+            .iter()
+            .find(|p| p.project == input.project)
+            .ok_or_else(|| bad_request("projekt — brak commitów w tym miesiącu", &input.project))?;
+        let fingerprint = git_fingerprint(std::slice::from_ref(project), author);
+        store_git_summary(invoice_key(&month, &input.project), fingerprint, &summary);
+        Ok(Json(serde_json::json!({"project": input.project, "summary": summary})))
     })
     .await
     .map_err(join_error)?
