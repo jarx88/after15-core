@@ -770,7 +770,7 @@ fn save_git_summaries(map: &HashMap<String, (u64, String)>) {
     }
 }
 
-/// claude CLI (subscription auth) with the small Haiku model, on demand only.
+/// Zapas: claude CLI (subscription auth) z małym Haiku, gdy Codex zawiedzie.
 /// --strict-mcp-config i --setting-sources '' są nośne: bez nich każde wywołanie startuje
 /// wszystkie serwery MCP, hooki i pluginy z ~/.claude (~5,7 s CPU i ~324 MB zamiast ~0,9 s),
 /// a lista commitów staje się osiągalna dla serwerów pamięci w rodzaju Hindsight.
@@ -816,9 +816,12 @@ fn run_claude(prompt: &str) -> Result<String, ApiError> {
     Ok(summary)
 }
 
-/// Fallback na Codex, gdy claude nie działa (brak binarki, wygasła sesja, timeout).
-/// `--ephemeral` nie zostawia pliku sesji w ~/.codex/sessions, więc podsumowanie
-/// nie wpada do liczenia nadgodzin. `-o` daje samą odpowiedź, bez logu przebiegu.
+/// Model Codexa do podsumowań (wybór Jarka, 2026-09-07).
+const CODEX_MODEL: &str = "gpt-5.6-luna";
+
+/// Codex z modelem `CODEX_MODEL`. `--ephemeral` nie zostawia pliku sesji
+/// w ~/.codex/sessions, więc podsumowanie nie wpada do liczenia nadgodzin.
+/// `-o` daje samą odpowiedź, bez logu przebiegu.
 fn run_codex(prompt: &str) -> Result<String, ApiError> {
     use std::io::Write;
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -836,6 +839,8 @@ fn run_codex(prompt: &str) -> Result<String, ApiError> {
             "read-only",
             "-C",
             "/tmp",
+            "-m",
+            CODEX_MODEL,
             "-o",
             &out_path.to_string_lossy(),
             "-",
@@ -871,13 +876,13 @@ fn run_codex(prompt: &str) -> Result<String, ApiError> {
     Ok(summary)
 }
 
-/// Najpierw claude (Haiku, tanio), przy błędzie Codex.
+/// Najpierw Codex (Luna), przy błędzie claude (Haiku) jako zapas.
 fn run_ai(prompt: &str) -> Result<String, ApiError> {
-    match run_claude(prompt) {
+    match run_codex(prompt) {
         Ok(summary) => Ok(summary),
         Err((_, message)) => {
-            eprintln!("[WARN] claude nieudany ({message}), próbuję codex");
-            run_codex(prompt)
+            eprintln!("[WARN] codex nieudany ({message}), próbuję claude");
+            run_claude(prompt)
         }
     }
 }
