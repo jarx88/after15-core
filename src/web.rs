@@ -1,10 +1,10 @@
 use axum::{
+    Json, Router,
     body::Body,
     extract::{Path, Query, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
-    Json, Router,
 };
 use chrono::{Datelike, Duration, NaiveDate, TimeZone, Utc};
 use chrono_tz::Europe::Warsaw;
@@ -38,7 +38,10 @@ pub fn router() -> Router {
         .route("/api/day/{date}/lock", post(lock_day))
         .route("/api/day/{date}/note", axum::routing::put(put_note))
         .route("/api/day/{date}/git", get(get_day_git))
-        .route("/api/day/{date}/git-summary", get(get_git_summary).post(post_git_summary))
+        .route(
+            "/api/day/{date}/git-summary",
+            get(get_git_summary).post(post_git_summary),
+        )
         .route("/api/rebuild", post(rebuild))
         .route("/api/shift", axum::routing::put(put_shift))
         .route("/api/projects", get(get_projects))
@@ -62,10 +65,12 @@ pub fn serve(bind: &str) {
     });
     let runtime = tokio::runtime::Runtime::new().expect("Nie można uruchomić Tokio");
     runtime.block_on(async move {
-        let listener = tokio::net::TcpListener::bind(address).await.unwrap_or_else(|e| {
-            eprintln!("[BŁĄD] Nie można uruchomić serwera na {address}: {e}");
-            std::process::exit(1);
-        });
+        let listener = tokio::net::TcpListener::bind(address)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("[BŁĄD] Nie można uruchomić serwera na {address}: {e}");
+                std::process::exit(1);
+            });
         println!("After15 web: http://{address}");
         tokio::spawn(auto_summary_loop());
         axum::serve(listener, router()).await.unwrap_or_else(|e| {
@@ -300,7 +305,8 @@ async fn get_month(
                 shift: config.shift_label(date),
                 shift_overridden: config.shift_override(date).is_some() && !config.is_b2b(date),
                 manual_override: stored.is_some_and(|day| day.manual_override),
-                has_note: stored.is_some_and(|day| day.note.as_deref().is_some_and(|n| !n.is_empty())),
+                has_note: stored
+                    .is_some_and(|day| day.note.as_deref().is_some_and(|n| !n.is_empty())),
                 has_summary: git_summaries.contains_key(&date.to_string()),
                 source: if stored.is_some_and(|day| day.manual_override) {
                     "ręczne"
@@ -556,9 +562,10 @@ async fn put_day(
         .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e))?;
     mutate_day(state, date, move |summary, config| {
         let key = date.to_string();
-        let entry = summary.days.entry(key).or_insert_with(|| {
-            archive::day_entry(date, 0.0, None, false, config)
-        });
+        let entry = summary
+            .days
+            .entry(key)
+            .or_insert_with(|| archive::day_entry(date, 0.0, None, false, config));
         entry.hours = hours;
         entry.formatted = archive::format_hm(hours);
         entry.processed = true;
@@ -582,7 +589,13 @@ async fn delete_override(
         let computed = cached_compute_day(date, config);
         summary.days.insert(
             date.to_string(),
-            archive::day_entry(date, computed.hours, Some(&computed.projects), false, config),
+            archive::day_entry(
+                date,
+                computed.hours,
+                Some(&computed.projects),
+                false,
+                config,
+            ),
         );
         Ok(())
     })
@@ -600,7 +613,13 @@ async fn lock_day(
             let computed = cached_compute_day(date, config);
             summary.days.insert(
                 key.clone(),
-                archive::day_entry(date, computed.hours, Some(&computed.projects), false, config),
+                archive::day_entry(
+                    date,
+                    computed.hours,
+                    Some(&computed.projects),
+                    false,
+                    config,
+                ),
             );
         }
         summary.days.get_mut(&key).unwrap().manual_override = true;
@@ -797,6 +816,72 @@ fn run_claude(prompt: &str) -> Result<String, ApiError> {
     Ok(summary)
 }
 
+/// Fallback na Codex, gdy claude nie działa (brak binarki, wygasła sesja, timeout).
+/// `--ephemeral` nie zostawia pliku sesji w ~/.codex/sessions, więc podsumowanie
+/// nie wpada do liczenia nadgodzin. `-o` daje samą odpowiedź, bez logu przebiegu.
+fn run_codex(prompt: &str) -> Result<String, ApiError> {
+    use std::io::Write;
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let out_path =
+        std::env::temp_dir().join(format!("after15-codex-{}-{seq}.txt", std::process::id()));
+    let mut child = std::process::Command::new("timeout")
+        .args([
+            "120",
+            "codex",
+            "exec",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "-s",
+            "read-only",
+            "-C",
+            "/tmp",
+            "-o",
+            &out_path.to_string_lossy(),
+            "-",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| internal(format!("Nie można uruchomić codex: {e}")))?;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(prompt.as_bytes())
+        .map_err(|e| internal(e.to_string()))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| internal(e.to_string()))?;
+    let summary = fs::read_to_string(&out_path)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let _ = fs::remove_file(&out_path);
+    if !output.status.success() || summary.is_empty() {
+        eprintln!(
+            "[WARN] codex exec nieudany: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        return Err(internal(
+            "Nie udało się wygenerować podsumowania".to_string(),
+        ));
+    }
+    Ok(summary)
+}
+
+/// Najpierw claude (Haiku, tanio), przy błędzie Codex.
+fn run_ai(prompt: &str) -> Result<String, ApiError> {
+    match run_claude(prompt) {
+        Ok(summary) => Ok(summary),
+        Err((_, message)) => {
+            eprintln!("[WARN] claude nieudany ({message}), próbuję codex");
+            run_codex(prompt)
+        }
+    }
+}
+
 fn git_fingerprint(projects: &[GitProject], author: Option<&str>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -869,7 +954,7 @@ fn ensure_git_summary(date: NaiveDate, config: &config::Config) -> Result<String
         }
         prompt.push('\n');
     }
-    let summary = run_claude(&prompt)?;
+    let summary = run_ai(&prompt)?;
     store_git_summary(date.to_string(), fingerprint, &summary);
     Ok(summary)
 }
@@ -892,9 +977,8 @@ async fn post_git_summary(
 async fn auto_summary_loop() {
     loop {
         let date = today() - Duration::days(1);
-        let task = tokio::task::spawn_blocking(move || {
-            ensure_git_summary(date, &config::load_config())
-        });
+        let task =
+            tokio::task::spawn_blocking(move || ensure_git_summary(date, &config::load_config()));
         if let Ok(Err((_, message))) = task.await {
             eprintln!("[WARN] Auto-podsumowanie {date} nieudane: {message}");
         }
@@ -929,11 +1013,16 @@ async fn put_note(
             let computed = compute_day(date, config);
             summary.days.insert(
                 key.clone(),
-                archive::day_entry(date, computed.hours, Some(&computed.projects), false, config),
+                archive::day_entry(
+                    date,
+                    computed.hours,
+                    Some(&computed.projects),
+                    false,
+                    config,
+                ),
             );
         }
-        summary.days.get_mut(&key).unwrap().note =
-            if note.is_empty() { None } else { Some(note) };
+        summary.days.get_mut(&key).unwrap().note = if note.is_empty() { None } else { Some(note) };
         Ok(())
     })
     .await
@@ -1110,7 +1199,11 @@ async fn get_projects(
             .map(|project| {
                 let hours = project.hours.weekday_hours
                     + project.hours.weekend_hours
-                    + if full { project.hours.regular_hours } else { 0.0 };
+                    + if full {
+                        project.hours.regular_hours
+                    } else {
+                        0.0
+                    };
                 // amount_pln jest liczone per dzien stawka tego dnia (B2B vs nadgodziny),
                 // mnozenie sum miesiecznych przez jedna stawke zawyzaloby/zanizalo wrzesien 2026
                 let extra = project.hours.weekday_hours + project.hours.weekend_hours;
@@ -1245,7 +1338,11 @@ pub fn invoice_rows(
             summary: None,
         })
         .collect();
-    rows.sort_by(|a, b| b.hours.total_cmp(&a.hours).then_with(|| a.project.cmp(&b.project)));
+    rows.sort_by(|a, b| {
+        b.hours
+            .total_cmp(&a.hours)
+            .then_with(|| a.project.cmp(&b.project))
+    });
     rows
 }
 
@@ -1299,7 +1396,7 @@ fn invoice_data(
         for commit in &project.commits {
             prompt.push_str(&format!("- {} {}\n", commit.time, commit.subject));
         }
-        match run_claude(&prompt) {
+        match run_ai(&prompt) {
             Ok(summary) => {
                 store_git_summary(key, fingerprint, &summary);
                 row.summary = Some(summary);
@@ -1482,7 +1579,9 @@ mod tests {
 
     #[test]
     fn reports_expired_claude_session() {
-        assert!(git_summary_error("Failed to authenticate: OAuth session expired")
-            .starts_with("Sesja Claude wygasła"));
+        assert!(
+            git_summary_error("Failed to authenticate: OAuth session expired")
+                .starts_with("Sesja Claude wygasła")
+        );
     }
 }
