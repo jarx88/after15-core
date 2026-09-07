@@ -2,8 +2,8 @@ use chrono::{Datelike, Local, NaiveDate};
 use colored::*;
 use std::collections::HashMap;
 use tabled::{
-    settings::{object::Columns, Alignment, Modify, Style},
     Table, Tabled,
+    settings::{Alignment, Modify, Style, object::Columns},
 };
 
 use crate::config::Config;
@@ -384,7 +384,7 @@ pub fn normalize_project_name(raw_name: &str, tracked_path: &str) -> String {
         return "Inne".to_string();
     }
 
-    if raw_name.contains(tracked_path) {
+    let short = if raw_name.contains(tracked_path) {
         // Support both -home-jarx- (old) and -home-jarek- (new) path formats
         let mut name = raw_name.to_string();
         for prefix in &[
@@ -393,28 +393,70 @@ pub fn normalize_project_name(raw_name: &str, tracked_path: &str) -> String {
         ] {
             name = name.replace(prefix, "");
         }
-        let name = name.trim_matches('-');
-        // Sesje z worktree Claude'a (…-<projekt>--claude-worktrees-<id>) zbijamy do projektu głównego
-        let name = name
-            .split_once("--claude-worktrees-")
-            .map(|(project, _)| project)
-            .unwrap_or(name);
-        if name.is_empty() {
-            "Inne".to_string()
-        } else {
-            name.to_string()
-        }
-    } else if !raw_name.starts_with("-home-") && raw_name != "unknown" && raw_name != "transcripts" {
-        // Already a short project name (e.g. archived by an older version) — keep it,
-        // merging Claude-worktree suffixes into the main project.
-        raw_name
-            .split_once("--claude-worktrees-")
-            .map(|(project, _)| project)
-            .unwrap_or(raw_name)
-            .to_string()
+        name.trim_matches('-').to_string()
+    } else if !raw_name.starts_with("-home-") && raw_name != "unknown" && raw_name != "transcripts"
+    {
+        // Already a short project name (e.g. archived by an older version) — keep it.
+        raw_name.to_string()
     } else {
-        "Inne".to_string()
+        return "Inne".to_string();
+    };
+
+    // Sesje z worktree Claude'a (…-<projekt>--claude-worktrees-<id>) zbijamy do projektu głównego
+    let name = short
+        .split_once("--claude-worktrees-")
+        .map(|(project, _)| project)
+        .unwrap_or(&short);
+    if name.is_empty() {
+        return "Inne".to_string();
     }
+    let base = dirs::home_dir().map(|h| h.join(tracked_path));
+    base.map(|b| resolve_worktree_root(&b, name))
+        .unwrap_or_else(|| name.to_string())
+}
+
+/// Katalog projektu, uwzględniając nazwę z Claude (`_` zamienione na `-`).
+fn project_dir(base: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    [name.to_string(), name.replace('-', "_")]
+        .into_iter()
+        .map(|n| base.join(n))
+        .find(|p| p.is_dir())
+}
+
+/// Zbija worktree leżące obok repo (`Programowanie/farmaster2-int-ux`) do projektu
+/// głównego. Rozpoznanie po pliku `.git` z linią `gitdir: …/<repo>/.git/worktrees/…`.
+/// Skasowany worktree nie ma już `.git`, więc wtedy szukamy najdłuższego prefiksu
+/// będącego istniejącym repo (`farmaster2-towary-refactor` → `farmaster2`).
+pub fn resolve_worktree_root(base: &std::path::Path, name: &str) -> String {
+    if let Some(dir) = project_dir(base, name) {
+        let git_marker = dir.join(".git");
+        if git_marker.is_dir() {
+            return name.to_string();
+        }
+        if let Ok(content) = std::fs::read_to_string(&git_marker) {
+            let root = content
+                .trim()
+                .strip_prefix("gitdir:")
+                .map(str::trim)
+                .and_then(|gitdir| gitdir.split_once("/.git/worktrees/"))
+                .and_then(|(repo, _)| std::path::Path::new(repo).file_name())
+                .map(|n| n.to_string_lossy().replace('_', "-"));
+            if let Some(root) = root {
+                return root;
+            }
+        }
+        return name.to_string();
+    }
+
+    // ponytail: prefiks zamiast historii git; wystarcza, bo nazwy worktree to zawsze <repo>-<opis>
+    let mut candidate = name;
+    while let Some((prefix, _)) = candidate.rsplit_once('-') {
+        if project_dir(base, prefix).map(|d| d.join(".git").is_dir()) == Some(true) {
+            return prefix.to_string();
+        }
+        candidate = prefix;
+    }
+    name.to_string()
 }
 
 fn get_day_emoji(shift_type: &ShiftType) -> &'static str {
@@ -486,6 +528,46 @@ mod tests {
             shift_desc(NaiveDate::from_ymd_opt(2026, 9, 5).unwrap(), &b2b),
             "B2B (cały dzień)"
         );
+    }
+
+    #[test]
+    fn worktree_next_to_repo_resolves_to_main_project() {
+        let base = std::env::temp_dir().join(format!("after15-wt-{}", std::process::id()));
+        std::fs::create_dir_all(base.join("farmaster2/.git")).unwrap();
+        std::fs::create_dir_all(base.join("farmaster2-int-ux")).unwrap();
+        std::fs::write(
+            base.join("farmaster2-int-ux/.git"),
+            format!(
+                "gitdir: {}/farmaster2/.git/worktrees/farmaster2-int-ux\n",
+                base.display()
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir_all(base.join("Natubay-sklep/.git")).unwrap();
+
+        // żywy worktree → po pliku .git
+        assert_eq!(
+            resolve_worktree_root(&base, "farmaster2-int-ux"),
+            "farmaster2"
+        );
+        // skasowany worktree → po prefiksie
+        assert_eq!(
+            resolve_worktree_root(&base, "farmaster2-towary-refactor"),
+            "farmaster2"
+        );
+        // zwykłe repo zostaje sobą
+        assert_eq!(resolve_worktree_root(&base, "farmaster2"), "farmaster2");
+        assert_eq!(
+            resolve_worktree_root(&base, "Natubay-sklep"),
+            "Natubay-sklep"
+        );
+        // brak repo → bez zmian
+        assert_eq!(
+            resolve_worktree_root(&base, "Nieznany-projekt"),
+            "Nieznany-projekt"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
