@@ -239,17 +239,26 @@ fn month_project_rows(
     rate: f64,
     weekend: bool,
     b2b: bool,
+    tracked_path: &str,
 ) -> Vec<MonthProject> {
-    let mut rows: Vec<_> = projects
-        .iter()
-        .map(|(name, hours)| MonthProject {
-            name: name.clone(),
-            weekday_hours: hours.weekday_hours,
-            weekend_hours: hours.weekend_hours,
-            regular_hours: hours.regular_hours,
-            pln: (hours.weekday_hours + hours.weekend_hours) * rate,
-        })
-        .collect();
+    // Nazwy po normalizacji (worktree → repo główne), więc kilka surowych kluczy
+    // może zlać się w jeden wiersz.
+    let mut merged: HashMap<String, MonthProject> = HashMap::new();
+    for (name, hours) in projects {
+        let name = report::normalize_project_name(name, tracked_path);
+        let row = merged.entry(name.clone()).or_insert(MonthProject {
+            name,
+            weekday_hours: 0.0,
+            weekend_hours: 0.0,
+            regular_hours: 0.0,
+            pln: 0.0,
+        });
+        row.weekday_hours += hours.weekday_hours;
+        row.weekend_hours += hours.weekend_hours;
+        row.regular_hours += hours.regular_hours;
+        row.pln += (hours.weekday_hours + hours.weekend_hours) * rate;
+    }
+    let mut rows: Vec<_> = merged.into_values().collect();
     // Tylko dni B2B — na starszych miesiacach kubelek zmienilby widok i kwoty,
     // a faktura i tak liczy wylacznie dni B2B.
     let rest = unassigned_hours(hours, projects);
@@ -308,6 +317,7 @@ async fn get_month(
                     config.day_rate(date),
                     schedule::is_weekend(date),
                     config.is_b2b(date),
+                    &config.projects.tracked_path,
                 ),
             });
         }
