@@ -1380,10 +1380,10 @@ pub fn invoice_rows(
     rows
 }
 
-/// `invoice3`: kompaktowy prompt dla nietechnicznego przełożonego (2026-09-07);
-/// stare klucze `invoice:`/`invoice2:` zostają w pliku jako martwe.
+/// `invoice4`: punkty per obszar pracy dla nietechnicznego przełożonego (2026-09-07);
+/// stare klucze `invoice:`..`invoice3:` zostają w pliku jako martwe.
 fn invoice_key(month: &str, project: &str) -> String {
-    format!("invoice3:{month}:{project}")
+    format!("invoice4:{month}:{project}")
 }
 
 /// Wiersze faktury z opisami prac. Opis z cache'u tylko przy zgodnym fingerprincie commitow;
@@ -1427,8 +1427,11 @@ fn invoice_data(
              opis prac do załącznika do faktury dla przełożonego, który NIE jest programistą \
              i ma zrozumieć, co konkretnie zostało zrobione i po co.\n\
              Zasady:\n\
-             - Maksymalnie kompaktowo: 2-4 krótkie zdania, łącznie do 60 słów. Zwykły tekst, \
-             bez nagłówków, list i markdownu. Każde zdanie ma nieść jeden konkretny efekt.\n\
+             - Forma: lista 3-6 punktów, każdy w osobnej linii zaczynającej się od \"- \". \
+             Jeden punkt = jeden obszar pracy (np. ekran, raport, automat, cenniki); \
+             wszystkie zmiany z tego samego obszaru łącz w jeden punkt. Punkt zaczyna się \
+             krótką nazwą obszaru i dwukropkiem, potem co zrobiono, maks. 25 słów. \
+             Bez nagłówków, bez wstępu, bez markdownu poza myślnikiem na początku linii.\n\
              - Pisz o efektach dla użytkowników i firmy: co teraz działa, co zostało naprawione, \
              jaki problem to rozwiązuje, co użytkownik widzi inaczej.\n\
              - Zero żargonu technicznego: nie używaj słów typu commit, refactor, endpoint, API, \
@@ -1437,8 +1440,8 @@ fn invoice_data(
              (np. zamiast „reconciliation po MD5” napisz „automatyczne wykrywanie, które pliki \
              z cennikiem naprawdę się zmieniły”).\n\
              - Nazwy ekranów i funkcji podawaj tak, jak widzi je użytkownik.\n\
-             - Nie wymieniaj commitów po kolei, grupuj w tematy i zostaw tylko 2-4 najważniejsze. \
-             Pomiń drobne porządki w kodzie, chyba że mają widoczny skutek.\n\n",
+             - Nie wymieniaj commitów po kolei. Pomiń drobne porządki w kodzie, chyba że mają \
+             widoczny skutek.\n\n",
             row.project
         );
         for commit in &project.commits {
