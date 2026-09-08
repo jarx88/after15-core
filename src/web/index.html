@@ -223,10 +223,37 @@ function fx(sym,cls){
   e.style.setProperty('--dx',rnd(-14,14)+'px');
   document.body.appendChild(e);setTimeout(()=>e.remove(),1000);
 }
+// Free intervals for the canvas's left edge, with room for jumps and a small gap.
+function petLanes(width,height,petWidth,petHeight,rects){
+  if(width<petWidth)return [];
+  let free=[[0,width-petWidth]];
+  for(const r of rects){
+    if(r.width<=0||r.height<=0||r.bottom<=height-petHeight||r.top>=height)continue;
+    const left=r.left-petWidth-8,right=r.right+8;
+    free=free.flatMap(([a,b])=>right<=a||left>=b?[[a,b]]:
+      [...(left>a?[[a,left]]:[]),...(right<b?[[right,b]]:[])]);
+  }
+  return free;
+}
+let lanes=[];
 function step(){
   if(document.hidden)return;
   tick++;
-  const max=innerWidth-UW*S;
+  const max=Math.max(0,innerWidth-cv.width/DPR);
+  if(tick%5===1)lanes=petLanes(innerWidth,innerHeight,cv.width/DPR,cv.height/DPR+40,
+    [...document.querySelectorAll('.cell:not(.empty),.data-table,.project-panel,.projects-table,.chart,.drawer,.legend,button,input,select,textarea,.note,.toast')]
+      .filter(e=>e.getClientRects().length)
+      .map(e=>{
+        if(e.matches('.note')){const r=document.createRange();r.selectNodeContents(e);return r.getBoundingClientRect()}
+        return e.getBoundingClientRect();
+      }));
+  pet.style.visibility=lanes.length?'visible':'hidden';
+  if(!lanes.length){bubble.classList.remove('on');return}
+  const lane=lanes.find(([a,b])=>x>=a&&x<=b)||lanes.reduce((best,l)=>
+    Math.abs(Math.max(l[0],Math.min(l[1],x))-x)<Math.abs(Math.max(best[0],Math.min(best[1],x))-x)?l:best);
+  const escaping=x<lane[0]||x>lane[1];
+  if(escaping){target=Math.max(lane[0],Math.min(lane[1],x));if(mode!=='walk')setMode('walk');t=40;air=0}
+  else if(target!==null)target=Math.max(lane[0],Math.min(lane[1],target));
   if(blink)blink--;
   else if(Math.random()<.012&&mode!=='sleep'&&mode!=='yawn')blink=3;
   const moving=mode==='walk'||mode==='run'||mode==='sniff';
@@ -236,7 +263,7 @@ function step(){
     const v=(mode==='run'?3:mode==='sniff'?.4:.95)*boost;
     if(target!==null){
       dir=target>x?1:-1;
-      if(Math.abs(target-x)<8){target=null;setMode('sit')}
+      if(Math.abs(target-x)<v){x=target;target=null;setMode('sit')}
     }
     x+=dir*v;
     if(x>=max){x=max;dir=-1}
@@ -250,6 +277,10 @@ function step(){
   }else if(mode==='spin'){
     if(tick%3===0)dir=-dir;
     phase+=.5;
+  }
+  if(!escaping){
+    if(x>=lane[1]){x=lane[1];dir=-1}
+    if(x<=lane[0]){x=lane[0];dir=1}
   }
   // płynne dojście do docelowej pozy
   const goal={...BASE,...POSE[mode]};
