@@ -45,6 +45,12 @@ pub fn router() -> Router {
         .route("/api/rebuild", post(rebuild))
         .route("/api/shift", axum::routing::put(put_shift))
         .route("/api/projects", get(get_projects))
+        .route(
+            "/api/settlements",
+            get(get_settlements).post(post_settlement),
+        )
+        .route("/api/settlements/{id}", axum::routing::put(put_settlement))
+        .route("/api/settlements/import", post(import_settlements))
         .route("/api/months", get(get_months))
         .route("/api/report/{file}", get(get_pdf))
         .route("/api/invoice/{month}", get(get_invoice))
@@ -106,6 +112,179 @@ fn parse_month(value: &str) -> Result<NaiveDate, ApiError> {
 
 fn today() -> NaiveDate {
     Utc::now().with_timezone(&Warsaw).date_naive()
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Settlements {
+    entries: Vec<Settlement>,
+    legacy_imported: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Settlement {
+    id: u64,
+    #[serde(flatten)]
+    payment: SettlementInput,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SettlementInput {
+    amount_grosz: i64,
+    note: String,
+    date: String,
+}
+
+impl SettlementInput {
+    fn validate(&self) -> Result<(), ApiError> {
+        if !(1..=100_000_000_000).contains(&self.amount_grosz) {
+            return Err(bad_request(
+                "kwota w groszach",
+                &self.amount_grosz.to_string(),
+            ));
+        }
+        if self.note.chars().count() > 2000 {
+            return Err(bad_request("opis", "maksymalnie 2000 znaków"));
+        }
+        let date = parse_date(&self.date)?;
+        if date.format("%Y-%m-%d").to_string() != self.date {
+            return Err(bad_request("format daty", &self.date));
+        }
+        Ok(())
+    }
+}
+
+fn settlements_path() -> Result<std::path::PathBuf, ApiError> {
+    dirs::data_dir()
+        .map(|dir| dir.join("claude-overtime/settlements.json"))
+        .ok_or_else(|| internal("Nie można ustalić katalogu rozliczeń".into()))
+}
+
+fn load_settlements(path: &std::path::Path) -> Result<Settlements, ApiError> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Settlements::default());
+        }
+        Err(error) => return Err(internal(error.to_string())),
+    };
+    let ledger: Settlements =
+        serde_json::from_slice(&bytes).map_err(|e| internal(e.to_string()))?;
+    let mut ids = std::collections::HashSet::new();
+    for entry in &ledger.entries {
+        entry
+            .payment
+            .validate()
+            .map_err(|(_, message)| internal(message))?;
+        if entry.id == 0 || !ids.insert(entry.id) {
+            return Err(internal(
+                "Uszkodzona historia rozliczeń: identyfikatory".into(),
+            ));
+        }
+    }
+    Ok(ledger)
+}
+
+async fn get_settlements() -> Result<Json<Settlements>, ApiError> {
+    tokio::task::spawn_blocking(|| load_settlements(&settlements_path()?).map(Json))
+        .await
+        .map_err(join_error)?
+}
+
+async fn mutate_settlements<F>(operation: F) -> Result<Json<Settlements>, ApiError>
+where
+    F: FnOnce(&mut Settlements) -> Result<(), ApiError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        use fs2::FileExt;
+        use std::io::Write;
+        let path = settlements_path()?;
+        let directory = path.parent().unwrap();
+        fs::create_dir_all(directory).map_err(|e| internal(e.to_string()))?;
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path.with_extension("lock"))
+            .map_err(|e| internal(e.to_string()))?;
+        lock.lock_exclusive().map_err(|e| internal(e.to_string()))?;
+        let mut ledger = load_settlements(&path)?;
+        operation(&mut ledger)?;
+        let bytes = serde_json::to_vec_pretty(&ledger).map_err(|e| internal(e.to_string()))?;
+        let temporary = path.with_extension("tmp");
+        let mut file = fs::File::create(&temporary).map_err(|e| internal(e.to_string()))?;
+        file.write_all(&bytes)
+            .map_err(|e| internal(e.to_string()))?;
+        file.sync_all().map_err(|e| internal(e.to_string()))?;
+        fs::rename(&temporary, &path).map_err(|e| internal(e.to_string()))?;
+        fs::File::open(directory)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|e| internal(e.to_string()))?;
+        Ok(Json(ledger))
+    })
+    .await
+    .map_err(join_error)?
+}
+
+fn add_settlement(ledger: &mut Settlements, payment: SettlementInput) -> Result<(), ApiError> {
+    payment.validate()?;
+    let id = ledger
+        .entries
+        .iter()
+        .map(|entry| entry.id)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| internal("Brak wolnych identyfikatorów rozliczeń".into()))?;
+    ledger.entries.push(Settlement { id, payment });
+    Ok(())
+}
+
+async fn post_settlement(
+    Json(payment): Json<SettlementInput>,
+) -> Result<Json<Settlements>, ApiError> {
+    mutate_settlements(move |ledger| add_settlement(ledger, payment)).await
+}
+
+async fn put_settlement(
+    Path(id): Path<u64>,
+    Json(payment): Json<SettlementInput>,
+) -> Result<Json<Settlements>, ApiError> {
+    payment.validate()?;
+    mutate_settlements(move |ledger| {
+        let entry = ledger
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == id)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "Nie znaleziono rozliczenia".into()))?;
+        entry.payment = payment;
+        Ok(())
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct SettlementImport {
+    amount_grosz: i64,
+}
+
+async fn import_settlements(
+    Json(input): Json<SettlementImport>,
+) -> Result<Json<Settlements>, ApiError> {
+    mutate_settlements(move |ledger| {
+        if !ledger.legacy_imported {
+            add_settlement(
+                ledger,
+                SettlementInput {
+                    amount_grosz: input.amount_grosz,
+                    note: "Rozliczenia sprzed wprowadzenia historii".into(),
+                    date: today().format("%Y-%m-%d").to_string(),
+                },
+            )?;
+            ledger.legacy_imported = true;
+        }
+        Ok(())
+    })
+    .await
 }
 
 fn project_hours(entry: &archive::ProjectHoursEntry) -> jsonl::ProjectHours {
@@ -1547,7 +1726,9 @@ async fn put_invoice_summary(
             .ok_or_else(|| bad_request("projekt — brak commitów w tym miesiącu", &input.project))?;
         let fingerprint = git_fingerprint(std::slice::from_ref(project), author);
         store_git_summary(invoice_key(&month, &input.project), fingerprint, &summary);
-        Ok(Json(serde_json::json!({"project": input.project, "summary": summary})))
+        Ok(Json(
+            serde_json::json!({"project": input.project, "summary": summary}),
+        ))
     })
     .await
     .map_err(join_error)?
