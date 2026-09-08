@@ -12,8 +12,9 @@ assert.equal(settlementGrosz('0.29'), 29);
 assert.equal(settlementGrosz('8500'), 850000);
 for (const bad of ['-1', '0', '1.234', '1e3', 'Infinity', '', '1000000001']) assert.equal(settlementGrosz(bad), null);
 const entries = [{amount_grosz:850000,date:'2026-09-08'},{amount_grosz:29,date:'2026-09-09'},{amount_grosz:200000,date:'2025-12-31'}];
-const totals = settlementBalance({overtime_pln:49950,b2b_pln:2209.29},entries,'2026');
-assert.equal(totals.paid, 850029);
-assert.equal(totals.balance, 4365900);
-assert.equal(settlementBalance({overtime_pln:0,b2b_pln:100},entries,'2027').balance, 10000);
+const totals = settlementBalance({overtime_pln:49950,b2b_pln:2209.29},entries);
+assert.equal(totals.paid, 1050029);
+assert.equal(totals.balance, 4165900);
+// A payment's date is history only; moving it to another year cannot change the wallet.
+assert.equal(settlementBalance({overtime_pln:49950,b2b_pln:2209.29},entries.map(e=>({...e,date:'2027-01-01'}))).balance, totals.balance);
 console.log('Settlements: OK');

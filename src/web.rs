@@ -1406,7 +1406,8 @@ async fn get_projects(
         let summary = archive::load_summary_checked().map_err(internal)?;
         let full = mode == "all";
         let config = state.config();
-        let totals = crate::calculate_project_totals(&summary_projects(&summary), &config, full);
+        let totals =
+            crate::calculate_project_totals(&summary_projects(&summary), &config, full, None);
         let values: Vec<_> = totals
             .into_iter()
             .map(|project| {

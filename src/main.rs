@@ -211,7 +211,12 @@ fn print_project_totals(
 ) {
     use colored::*;
 
-    let totals = after15::calculate_project_totals(daily_projects, config, full);
+    let totals = after15::calculate_project_totals(
+        daily_projects,
+        config,
+        full,
+        Some(after15::current_year()),
+    );
 
     if totals.is_empty() {
         println!("{}", "Brak danych projektowych w archiwum.".red());
@@ -605,7 +610,12 @@ fn build_telegram_month_table(
             .iter()
             .filter_map(|d| daily_projects.get(d).map(|p| (*d, p.clone())))
             .collect();
-    let sorted = after15::calculate_project_totals(&month_projects, config, false);
+    let sorted = after15::calculate_project_totals(
+        &month_projects,
+        config,
+        false,
+        Some(after15::current_year()),
+    );
 
     let mut rows: Vec<String> = Vec::new();
     rows.push(format!(
