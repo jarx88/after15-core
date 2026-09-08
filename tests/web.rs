@@ -83,10 +83,10 @@ async fn web_contract_and_mutations_are_isolated() {
 
     let (status, projects) = request(&app, "GET", "/api/projects?mode=overtime", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(projects["total_formatted"], "7:00");
-    assert!(projects.to_string().contains("zeszloroczny"));
+    assert_eq!(projects["total_formatted"], "2:00");
+    assert!(!projects.to_string().contains("zeszloroczny"));
     // Rozbicie etat/B2B: bez b2b_from wszystko jest etatowymi nadgodzinami.
-    assert_eq!(projects["overtime_hours"], 7.0);
+    assert_eq!(projects["overtime_hours"], 2.0);
     assert_eq!(projects["b2b_hours"], 0.0);
     assert_eq!(projects["overtime_pln"], projects["earned_pln"]);
     assert_eq!(projects["projects"][0]["b2b_pln"], 0.0);
@@ -289,15 +289,50 @@ async fn web_contract_and_mutations_are_isolated() {
         .sum();
     assert!((b2b_pln - invoice["total_amount"].as_f64().unwrap()).abs() < 1e-6);
 
+    let mut summary = archive::load_summary_checked().unwrap();
+    for (date, name, hours) in [
+        ("2026-01-01", "wallet-start", 1.0),
+        ("2027-01-01", "wallet-next-year", 2.0),
+    ] {
+        let projects = HashMap::from([(
+            name.to_string(),
+            jsonl::ProjectHours {
+                weekday_hours: hours,
+                regular_hours: 8.0,
+                ..Default::default()
+            },
+        )]);
+        summary.days.insert(
+            date.to_string(),
+            archive::day_entry(
+                NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
+                hours,
+                Some(&projects),
+                true,
+                &cfg,
+            ),
+        );
+    }
+    archive::save_summary(&summary).unwrap();
     let (_, lifetime) = request(&app, "GET", "/api/projects?mode=overtime", None).await;
     let (_, full) = request(&app, "GET", "/api/projects?mode=all", None).await;
     assert!(
-        lifetime["projects"]
+        !lifetime["projects"]
             .as_array()
             .unwrap()
             .iter()
             .any(|row| row["name"].as_str().unwrap().ends_with("zeszloroczny"))
     );
+    for name in ["wallet-start", "wallet-next-year"] {
+        assert!(
+            lifetime["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["name"] == name)
+        );
+    }
+    assert!(full["total_hours"].as_f64().unwrap() > lifetime["total_hours"].as_f64().unwrap());
     assert!(lifetime["b2b_pln"].as_f64().unwrap() > 0.0);
     assert_eq!(lifetime["earned_pln"], full["earned_pln"]);
     let billing_config = config::load_config();
@@ -305,6 +340,7 @@ async fn web_contract_and_mutations_are_isolated() {
         .unwrap()
         .days
         .iter()
+        .filter(|(date, _)| date.as_str() >= "2026-01-01")
         .map(|(date, day)| {
             let hours: f64 = day
                 .projects

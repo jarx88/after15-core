@@ -1406,8 +1406,10 @@ async fn get_projects(
         let summary = archive::load_summary_checked().map_err(internal)?;
         let full = mode == "all";
         let config = state.config();
-        let totals =
-            crate::calculate_project_totals(&summary_projects(&summary), &config, full, None);
+        let mut projects = summary_projects(&summary);
+        let wallet_start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        projects.retain(|date, _| *date >= wallet_start);
+        let totals = crate::calculate_project_totals(&projects, &config, full, None);
         let values: Vec<_> = totals
             .into_iter()
             .map(|project| {
