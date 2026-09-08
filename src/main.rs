@@ -6,6 +6,93 @@ use after15::{archive, config, jsonl, overtime, pdf, report, schedule, telegram,
 
 use report::format_hm;
 
+fn merge_recent_overtime(
+    data: &mut jsonl::DailySummaryData,
+    recent: jsonl::TodayData,
+    archive: &archive::DailySummaryFile,
+    today: chrono::NaiveDate,
+    include_today: bool,
+    recent_days: i64,
+) {
+    let refresh = |date: chrono::NaiveDate| {
+        date >= today - chrono::Duration::days(recent_days)
+            && archive
+                .days
+                .get(&date.to_string())
+                .is_some_and(|day| !day.manual_override && !day.excluded_sessions.is_empty())
+    };
+    for (date, hours) in recent.hours {
+        if (include_today || date != today)
+            && (date == today || !data.hours.contains_key(&date) || refresh(date))
+        {
+            data.hours.insert(date, hours);
+        }
+    }
+    for (date, projects) in recent.projects {
+        if (include_today || date != today)
+            && (date == today || !data.projects.contains_key(&date) || refresh(date))
+        {
+            data.projects.insert(date, projects);
+        }
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    #[test]
+    fn recent_excluded_days_refresh_hours_and_projects_but_not_manual_days() {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();
+        let today = date.succ_opt().unwrap();
+        let data = |hours| jsonl::TodayData {
+            hours: HashMap::from([(date, hours)]),
+            projects: HashMap::from([(
+                date,
+                HashMap::from([(
+                    "proj".into(),
+                    jsonl::ProjectHours {
+                        weekday_hours: hours,
+                        ..Default::default()
+                    },
+                )]),
+            )]),
+        };
+        for include_today in [false, true] {
+            for manual in [false, true] {
+                let mut summary = archive::DailySummaryFile::default();
+                summary.days.insert(
+                    date.to_string(),
+                    archive::DayEntry {
+                        manual_override: manual,
+                        excluded_sessions: vec!["16:00:00→16:30:00".into()],
+                        ..Default::default()
+                    },
+                );
+                let old = data(0.5);
+                let mut current = jsonl::DailySummaryData {
+                    hours: old.hours,
+                    projects: old.projects,
+                };
+                merge_recent_overtime(&mut current, data(3.0), &summary, today, include_today, 1);
+                let expected = if manual { 0.5 } else { 3.0 };
+                assert_eq!(current.hours[&date], expected);
+                assert_eq!(current.projects[&date]["proj"].weekday_hours, expected);
+                merge_recent_overtime(
+                    &mut current,
+                    data(1.0),
+                    &summary,
+                    today + chrono::Duration::days(1),
+                    include_today,
+                    1,
+                );
+                assert_eq!(current.hours[&date], expected);
+                assert_eq!(current.projects[&date]["proj"].weekday_hours, expected);
+            }
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "after15")]
 #[command(about = "Kalkulator nadgodzin z sesji Claude Code i Codex")]
@@ -91,25 +178,21 @@ fn main() {
     }
 
     if cli.statusline {
-        let summary = jsonl::load_daily_summary_full(&config, false);
-        let mut daily_hours = summary.hours;
-        let mut daily_projects = summary.projects;
+        let mut summary = jsonl::load_daily_summary_full(&config, false);
         let today = Local::now().date_naive();
 
         if let Some(_daily_lock) = archive::lock_daily_automation() {
             if archive::needs_daily_archive() {
                 let recent_data = jsonl::load_recent_overtime(1, &config, false);
-                for (date, hours) in recent_data.hours {
-                    if date != today && !daily_hours.contains_key(&date) {
-                        daily_hours.insert(date, hours);
-                    }
-                }
-                for (date, projects) in recent_data.projects {
-                    if date != today && !daily_projects.contains_key(&date) {
-                        daily_projects.insert(date, projects);
-                    }
-                }
-                archive::archive_overtime(&daily_hours, &daily_projects, &config, false);
+                merge_recent_overtime(
+                    &mut summary,
+                    recent_data,
+                    &archive::load_summary(),
+                    today,
+                    false,
+                    1,
+                );
+                archive::archive_overtime(&summary.hours, &summary.projects, &config, false);
                 telegram::auto_daily_backup(&config);
                 archive::mark_daily_archive_done();
             }
@@ -118,11 +201,11 @@ fn main() {
         let today_data = jsonl::load_today_overtime(&config, false);
         for (date, hours) in today_data.hours {
             if date == today {
-                daily_hours.insert(date, hours);
+                summary.hours.insert(date, hours);
             }
         }
 
-        print_statusline(&daily_hours, &config);
+        print_statusline(&summary.hours, &config);
         return;
     }
 
@@ -144,23 +227,21 @@ fn main() {
         }
     }
 
-    let summary = jsonl::load_daily_summary_full(&config, cli.debug);
-    let mut daily_hours = summary.hours;
-    let mut daily_projects = summary.projects;
+    let mut summary = jsonl::load_daily_summary_full(&config, cli.debug);
 
     let today = Local::now().date_naive();
     let recent_data = jsonl::load_recent_overtime(1, &config, cli.debug);
 
-    for (date, hours) in recent_data.hours {
-        if date == today || !daily_hours.contains_key(&date) {
-            daily_hours.insert(date, hours);
-        }
-    }
-    for (date, projects) in recent_data.projects {
-        if date == today || !daily_projects.contains_key(&date) {
-            daily_projects.insert(date, projects);
-        }
-    }
+    merge_recent_overtime(
+        &mut summary,
+        recent_data,
+        &archive::load_summary(),
+        today,
+        true,
+        1,
+    );
+    let daily_hours = summary.hours;
+    let daily_projects = summary.projects;
 
     archive::archive_overtime(&daily_hours, &daily_projects, &config, cli.debug);
 
@@ -407,7 +488,11 @@ fn print_explain(date: chrono::NaiveDate, debug: bool) {
     println!("Okno pracy: {}", window_desc);
     println!();
 
-    let sessions = jsonl::load_sessions_for_date(date, &cfg, debug);
+    let exclusions = archive::session_exclusions();
+    let sessions: Vec<_> = jsonl::load_sessions_for_date(date, &cfg, debug)
+        .iter()
+        .flat_map(|session| overtime::exclude_session_ranges(session, &exclusions))
+        .collect();
 
     if sessions.is_empty() {
         println!("{}", "Brak sesji z nadgodzinami dla tego dnia.".red());

@@ -399,8 +399,17 @@ fn month_day_data(
     config: &config::Config,
 ) -> Vec<(NaiveDate, f64, HashMap<String, jsonl::ProjectHours>)> {
     let archived = summary_projects(summary);
-    let live = (first.year() == today().year() && first.month() == today().month())
-        .then(|| cached_compute_day(today(), config));
+    let live = (first.year() == today().year() && first.month() == today().month()).then(|| {
+        computed_with_exclusions(
+            today(),
+            config,
+            summary
+                .days
+                .get(&today().to_string())
+                .map(|d| d.excluded_sessions.as_slice())
+                .unwrap_or(&[]),
+        )
+    });
     let mut days = Vec::new();
     let mut date = first;
     while date.month() == first.month() {
@@ -539,6 +548,8 @@ struct SessionProject {
 
 #[derive(Serialize, Clone)]
 struct DaySession {
+    key: String,
+    excluded: bool,
     start: String,
     end: String,
     duration_s: i64,
@@ -572,6 +583,7 @@ struct ComputedDay {
     hours: f64,
     projects: HashMap<String, jsonl::ProjectHours>,
     sessions: Vec<DaySession>,
+    raw_sessions: Vec<jsonl::Session>,
 }
 
 pub fn clip_session_to_date(session: &jsonl::Session, date: NaiveDate) -> Option<jsonl::Session> {
@@ -646,11 +658,56 @@ fn cached_compute_day(date: NaiveDate, config: &config::Config) -> ComputedDay {
 }
 
 fn compute_day(date: NaiveDate, config: &config::Config) -> ComputedDay {
-    let mut result = ComputedDay::default();
-    for session in jsonl::load_sessions_for_date(date, config, false) {
+    compute_sessions(
+        date,
+        config,
+        jsonl::load_sessions_for_date(date, config, false),
+        &[],
+    )
+}
+
+fn computed_with_exclusions(
+    date: NaiveDate,
+    config: &config::Config,
+    excluded: &[String],
+) -> ComputedDay {
+    let raw = cached_compute_day(date, config);
+    if excluded.is_empty() {
+        return raw;
+    }
+    compute_sessions(date, config, raw.raw_sessions, excluded)
+}
+
+fn compute_sessions(
+    date: NaiveDate,
+    config: &config::Config,
+    sessions: Vec<jsonl::Session>,
+    excluded: &[String],
+) -> ComputedDay {
+    let mut result = ComputedDay {
+        raw_sessions: sessions.clone(),
+        ..Default::default()
+    };
+    let ranges: Vec<_> = excluded.iter().map(|key| (date, key.clone())).collect();
+    let mut parts = Vec::new();
+    for session in sessions {
         let Some(clipped) = clip_session_to_date(&session, date) else {
             continue;
         };
+        let retained = overtime::exclude_session_ranges(&clipped, &ranges);
+        let retained_ranges: Vec<_> = retained
+            .iter()
+            .map(|part| (date, overtime::session_exclusion_key(part, date)))
+            .collect();
+        parts.extend(
+            overtime::exclude_session_ranges(&clipped, &retained_ranges)
+                .into_iter()
+                .map(|part| (part, true)),
+        );
+        parts.extend(retained.into_iter().map(|part| (part, false)));
+    }
+    parts.sort_by_key(|(session, _)| session.start_time);
+    for (clipped, excluded) in parts {
         let overtime_h = overtime::calculate_session_overtime(&clipped, date, config, false)
             .get(&date)
             .copied()
@@ -660,19 +717,23 @@ fn compute_day(date: NaiveDate, config: &config::Config) -> ComputedDay {
             .copied()
             .unwrap_or(0.0);
         let projects = session_projects(&clipped, &config.projects.tracked_path);
-        for project in &projects {
-            let entry = result.projects.entry(project.name.clone()).or_default();
-            if schedule::is_weekend(date) {
-                entry.weekend_hours += overtime_h * project.share;
-            } else {
-                entry.weekday_hours += overtime_h * project.share;
+        if !excluded {
+            for project in &projects {
+                let entry = result.projects.entry(project.name.clone()).or_default();
+                if schedule::is_weekend(date) {
+                    entry.weekend_hours += overtime_h * project.share;
+                } else {
+                    entry.weekday_hours += overtime_h * project.share;
+                }
+                entry.regular_hours += regular_h * project.share;
             }
-            entry.regular_hours += regular_h * project.share;
+            result.hours += overtime_h;
         }
-        result.hours += overtime_h;
         let start = clipped.start_time.and_utc().with_timezone(&Warsaw);
         let end = clipped.end_time.and_utc().with_timezone(&Warsaw);
         result.sessions.push(DaySession {
+            key: overtime::session_exclusion_key(&clipped, date),
+            excluded,
             start: start.format("%H:%M").to_string(),
             end: if end.date_naive() > date {
                 "24:00".to_string()
@@ -705,7 +766,13 @@ async fn get_day(
 fn day_response(date: NaiveDate, config: &config::Config) -> Result<Json<DayResponse>, ApiError> {
     let summary = archive::load_summary_checked().map_err(internal)?;
     let stored = summary.days.get(&date.to_string());
-    let computed = cached_compute_day(date, config);
+    let computed = computed_with_exclusions(
+        date,
+        config,
+        stored
+            .map(|d| d.excluded_sessions.as_slice())
+            .unwrap_or(&[]),
+    );
     let window = config.effective_work_window(date);
     Ok(Json(DayResponse {
         date: date.to_string(),
@@ -728,7 +795,7 @@ fn day_response(date: NaiveDate, config: &config::Config) -> Result<Json<DayResp
 
 #[derive(Deserialize)]
 struct HoursInput {
-    hours: String,
+    hours: Option<String>,
     #[serde(default)]
     exclude_session: Option<String>,
 }
@@ -739,7 +806,35 @@ async fn put_day(
     Json(input): Json<HoursInput>,
 ) -> Result<Json<DayResponse>, ApiError> {
     let date = parse_date(&date)?;
-    let hours = crate::tui::state::parse_hours(&input.hours)
+    if let Some(mut exclusion) = input.exclude_session {
+        if overtime::session_exclusion_range(date, &exclusion).is_none() {
+            return Err(bad_request("przedział wykluczenia", &exclusion));
+        }
+        return mutate_day(state, date, move |summary, config| {
+            // Older clients send minute labels; store exact bounds whenever still available.
+            if let Some(session) = cached_compute_day(date, config)
+                .sessions
+                .iter()
+                .find(|s| format!("{}→{}", s.start, s.end) == exclusion)
+            {
+                exclusion = session.key.clone();
+            }
+            // Anchor to the selected segment so a still-running segment stays excluded.
+            let (start, _) = overtime::session_exclusion_range(date, &exclusion).unwrap();
+            exclusion = format!("{}→*", start.and_utc().to_rfc3339());
+            let entry = summary
+                .days
+                .entry(date.to_string())
+                .or_insert_with(|| archive::day_entry(date, 0.0, None, false, config));
+            if !entry.excluded_sessions.contains(&exclusion) {
+                entry.excluded_sessions.push(exclusion);
+            }
+            store_computed_day(summary, date, config);
+            Ok(())
+        })
+        .await;
+    }
+    let hours = crate::tui::state::parse_hours(input.hours.as_deref().unwrap_or(""))
         .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e))?;
     mutate_day(state, date, move |summary, config| {
         let key = date.to_string();
@@ -751,14 +846,31 @@ async fn put_day(
         entry.formatted = archive::format_hm(hours);
         entry.processed = true;
         entry.manual_override = true;
-        if let Some(key) = input.exclude_session {
-            if !entry.excluded_sessions.contains(&key) {
-                entry.excluded_sessions.push(key);
-            }
-        }
         Ok(())
     })
     .await
+}
+
+fn store_computed_day(
+    summary: &mut archive::DailySummaryFile,
+    date: NaiveDate,
+    config: &config::Config,
+) {
+    let previous = summary.days.get(&date.to_string());
+    let exclusions = previous
+        .map(|d| d.excluded_sessions.clone())
+        .unwrap_or_default();
+    let computed = computed_with_exclusions(date, config, &exclusions);
+    let mut entry = archive::day_entry(
+        date,
+        computed.hours,
+        Some(&computed.projects),
+        false,
+        config,
+    );
+    entry.note = previous.and_then(|d| d.note.clone());
+    entry.excluded_sessions = exclusions;
+    summary.days.insert(date.to_string(), entry);
 }
 
 async fn delete_override(
@@ -767,17 +879,7 @@ async fn delete_override(
 ) -> Result<Json<DayResponse>, ApiError> {
     let date = parse_date(&date)?;
     mutate_day(state, date, move |summary, config| {
-        let computed = cached_compute_day(date, config);
-        summary.days.insert(
-            date.to_string(),
-            archive::day_entry(
-                date,
-                computed.hours,
-                Some(&computed.projects),
-                false,
-                config,
-            ),
-        );
+        store_computed_day(summary, date, config);
         Ok(())
     })
     .await
@@ -790,19 +892,7 @@ async fn lock_day(
     let date = parse_date(&date)?;
     mutate_day(state, date, move |summary, config| {
         let key = date.to_string();
-        if !summary.days.contains_key(&key) {
-            let computed = cached_compute_day(date, config);
-            summary.days.insert(
-                key.clone(),
-                archive::day_entry(
-                    date,
-                    computed.hours,
-                    Some(&computed.projects),
-                    false,
-                    config,
-                ),
-            );
-        }
+        store_computed_day(summary, date, config);
         summary.days.get_mut(&key).unwrap().manual_override = true;
         Ok(())
     })

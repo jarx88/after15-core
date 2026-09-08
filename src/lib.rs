@@ -57,6 +57,11 @@ pub fn rebuild_archive(
         let note = summary.days.get(&key).and_then(|day| day.note.clone());
         let mut entry = archive::day_entry(*date, *hours, fresh.projects.get(date), false, config);
         entry.note = note;
+        entry.excluded_sessions = summary
+            .days
+            .get(&key)
+            .map(|day| day.excluded_sessions.clone())
+            .unwrap_or_default();
         summary.days.insert(key, entry);
         updated += 1;
     }

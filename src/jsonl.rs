@@ -442,7 +442,35 @@ fn load_overtime_from_files(
         );
     }
 
-    for session in sessions {
+    let exclusions = crate::archive::session_exclusions();
+    for session in &sessions {
+        // Keep source days present even when all their sessions were excluded.
+        let mut date = session
+            .start_time
+            .and_utc()
+            .with_timezone(&chrono_tz::Europe::Warsaw)
+            .date_naive();
+        let end_date = session
+            .end_time
+            .and_utc()
+            .with_timezone(&chrono_tz::Europe::Warsaw)
+            .date_naive();
+        while date <= end_date {
+            if date_filter.is_none_or(|filter| filter == date)
+                && exclusions
+                    .iter()
+                    .any(|(excluded_date, _)| *excluded_date == date)
+            {
+                result.hours.entry(date).or_insert(0.0);
+                result.projects.entry(date).or_default();
+            }
+            date += chrono::Duration::days(1);
+        }
+    }
+    for session in sessions
+        .iter()
+        .flat_map(|session| crate::overtime::exclude_session_ranges(session, &exclusions))
+    {
         let filter = date_filter.unwrap_or(session.start_time.date());
         let overtime = calculate_session_overtime(&session, filter, config, debug);
         let regular = calculate_session_regular(&session, config);
