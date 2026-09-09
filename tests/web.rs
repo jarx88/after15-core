@@ -289,8 +289,174 @@ async fn web_contract_and_mutations_are_isolated() {
         .sum();
     assert!((b2b_pln - invoice["total_amount"].as_f64().unwrap()).abs() < 1e-6);
 
+    let mut summary = archive::load_summary_checked().unwrap();
+    for (date, name, hours) in [
+        ("2026-01-01", "wallet-start", 1.0),
+        ("2027-01-01", "wallet-next-year", 2.0),
+    ] {
+        let projects = HashMap::from([(
+            name.to_string(),
+            jsonl::ProjectHours {
+                weekday_hours: hours,
+                regular_hours: 8.0,
+                ..Default::default()
+            },
+        )]);
+        summary.days.insert(
+            date.to_string(),
+            archive::day_entry(
+                NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap(),
+                hours,
+                Some(&projects),
+                true,
+                &cfg,
+            ),
+        );
+    }
+    archive::save_summary(&summary).unwrap();
+    let (_, lifetime) = request(&app, "GET", "/api/projects?mode=overtime", None).await;
+    let (_, full) = request(&app, "GET", "/api/projects?mode=all", None).await;
+    assert!(
+        !lifetime["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["name"].as_str().unwrap().ends_with("zeszloroczny"))
+    );
+    for name in ["wallet-start", "wallet-next-year"] {
+        assert!(
+            lifetime["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["name"] == name)
+        );
+    }
+    assert!(full["total_hours"].as_f64().unwrap() > lifetime["total_hours"].as_f64().unwrap());
+    assert!(lifetime["b2b_pln"].as_f64().unwrap() > 0.0);
+    assert_eq!(lifetime["earned_pln"], full["earned_pln"]);
+    let billing_config = config::load_config();
+    let expected: f64 = archive::load_summary_checked()
+        .unwrap()
+        .days
+        .iter()
+        .filter(|(date, _)| date.as_str() >= "2026-01-01")
+        .map(|(date, day)| {
+            let hours: f64 = day
+                .projects
+                .as_ref()
+                .map(|projects| {
+                    projects
+                        .values()
+                        .map(|hours| hours.weekday_hours + hours.weekend_hours)
+                        .sum()
+                })
+                .unwrap_or(0.0);
+            let hours = if day.manual_override && hours > 0.0 {
+                day.hours
+            } else {
+                hours
+            };
+            hours * billing_config.day_rate(NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap())
+        })
+        .sum();
+    assert!((lifetime["earned_pln"].as_f64().unwrap() - expected).abs() < 1e-6);
+
     fs::write(data.join("daily_summary.json"), "{broken").unwrap();
     assert!(archive::load_summary_checked().is_err());
+    let archive_before = fs::read(data.join("daily_summary.json")).unwrap();
+    let (status, ledger) = request(&app, "GET", "/api/settlements", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ledger, json!({"entries": [], "legacy_imported": false}));
+    let payment = json!({"amount_grosz": 101, "note": "Przelew", "date": "2026-09-08"});
+    let (status, ledger) = request(&app, "POST", "/api/settlements", Some(payment.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ledger["entries"][0]["id"], 1);
+    let mut edited = payment.clone();
+    edited["amount_grosz"] = json!(202);
+    edited["note"] = json!("Poprawiony przelew");
+    let (status, ledger) = request(&app, "PUT", "/api/settlements/1", Some(edited.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ledger["entries"][0]["note"], edited["note"]);
+    assert_eq!(
+        request(&app, "PUT", "/api/settlements/999", Some(payment.clone()))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    for (field, invalid) in [
+        ("amount_grosz", json!(0)),
+        ("amount_grosz", json!(-1)),
+        ("amount_grosz", json!(100_000_000_001_i64)),
+        ("date", json!("2026-02-30")),
+        ("date", json!("2026-9-08")),
+        ("note", json!("ą".repeat(2001))),
+    ] {
+        let mut invalid_payment = payment.clone();
+        invalid_payment[field] = invalid;
+        assert_eq!(
+            request(&app, "POST", "/api/settlements", Some(invalid_payment))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let import = json!({"amount_grosz": 10001});
+    let (first, second) = tokio::join!(
+        request(
+            &app,
+            "POST",
+            "/api/settlements/import",
+            Some(import.clone())
+        ),
+        request(&app, "POST", "/api/settlements/import", Some(import)),
+    );
+    assert_eq!(first.0, StatusCode::OK);
+    assert_eq!(second.0, StatusCode::OK);
+    assert_eq!(first.1, second.1);
+    let fresh_app = web::router();
+    let (_, saved) = request(&fresh_app, "GET", "/api/settlements", None).await;
+    assert_eq!(saved, first.1);
+    assert_eq!(saved["legacy_imported"], true);
+    assert_eq!(saved["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        saved["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["amount_grosz"].as_i64().unwrap())
+            .sum::<i64>(),
+        10203
+    );
+    let path = data.join("settlements.json");
+    fs::write(&path, b"broken JSON").unwrap();
+    assert_eq!(
+        request(&app, "GET", "/api/settlements", None).await.0,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(
+        request(&app, "POST", "/api/settlements", Some(payment.clone()))
+            .await
+            .0,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(fs::read(&path).unwrap(), b"broken JSON");
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    assert_eq!(
+        request(&app, "GET", "/api/settlements", None).await.0,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(
+        request(&app, "POST", "/api/settlements", Some(payment))
+            .await
+            .0,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(
+        fs::read(data.join("daily_summary.json")).unwrap(),
+        archive_before
+    );
     fs::remove_dir_all(root).ok();
 }
 

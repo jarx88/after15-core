@@ -57,6 +57,11 @@ pub fn rebuild_archive(
         let note = summary.days.get(&key).and_then(|day| day.note.clone());
         let mut entry = archive::day_entry(*date, *hours, fresh.projects.get(date), false, config);
         entry.note = note;
+        entry.excluded_sessions = summary
+            .days
+            .get(&key)
+            .map(|day| day.excluded_sessions.clone())
+            .unwrap_or_default();
         summary.days.insert(key, entry);
         updated += 1;
     }
@@ -95,11 +100,11 @@ pub fn calculate_project_totals(
     daily_projects: &HashMap<NaiveDate, HashMap<String, jsonl::ProjectHours>>,
     config: &config::Config,
     full: bool,
+    year: Option<i32>,
 ) -> Vec<ProjectTotal> {
     let mut totals: HashMap<String, ProjectTotal> = HashMap::new();
-    let year = current_year();
     for (date, projects) in daily_projects {
-        if date.year() != year {
+        if year.is_some_and(|year| date.year() != year) {
             continue;
         }
         for (raw_name, hours) in projects {
@@ -171,6 +176,41 @@ mod tests {
     }
 
     #[test]
+    fn lifetime_totals_include_prior_year_and_do_not_bill_regular_hours() {
+        let year = current_year();
+        let previous = NaiveDate::from_ymd_opt(year - 1, 12, 15).unwrap();
+        let current = NaiveDate::from_ymd_opt(year, 9, 3).unwrap();
+        let cfg = config::Config {
+            billing: config::BillingConfig {
+                b2b_from: Some(NaiveDate::from_ymd_opt(year, 9, 2).unwrap()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut data = day_projects(&[(previous, 2.0, 0.0), (current, 3.0, 0.0)]);
+        data.get_mut(&previous)
+            .unwrap()
+            .get_mut("proj")
+            .unwrap()
+            .regular_hours = 8.0;
+        let lifetime = calculate_project_totals(&data, &cfg, false, None);
+        let full = calculate_project_totals(&data, &cfg, true, None);
+        let annual = calculate_project_totals(&data, &cfg, false, Some(year));
+        assert_eq!(lifetime.len(), 1);
+        assert_eq!(lifetime[0].first_seen, previous);
+        assert_eq!(lifetime[0].hours.weekday_hours, 5.0);
+        assert_eq!(full[0].hours.regular_hours, 8.0);
+        assert_eq!(
+            lifetime[0].amount_pln,
+            2.0 * cfg.day_rate(previous) + 3.0 * cfg.day_rate(current)
+        );
+        assert_eq!(lifetime[0].amount_pln, full[0].amount_pln);
+        assert_eq!(lifetime[0].b2b_pln, 420.0);
+        assert_eq!(annual[0].hours.weekday_hours, 3.0);
+        assert_eq!(annual[0].amount_pln, 420.0);
+    }
+
+    #[test]
     fn amount_pln_uses_per_day_rate_across_cutover() {
         let cfg = config::Config {
             billing: config::BillingConfig {
@@ -183,7 +223,7 @@ mod tests {
         let after = NaiveDate::from_ymd_opt(2026, 9, 2).unwrap();
         let data = day_projects(&[(before, 2.0, 0.0), (after, 3.0, 0.0)]);
 
-        let totals = calculate_project_totals(&data, &cfg, false);
+        let totals = calculate_project_totals(&data, &cfg, false, Some(current_year()));
         assert_eq!(totals.len(), 1);
         let expected = 2.0 * cfg.overtime_rate_weekday() + 3.0 * 140.0;
         assert!((totals[0].amount_pln - expected).abs() < 1e-6);
@@ -197,7 +237,7 @@ mod tests {
         let weekend = NaiveDate::from_ymd_opt(2026, 8, 29).unwrap();
         let data = day_projects(&[(weekday, 2.0, 0.0), (weekend, 0.0, 4.0)]);
 
-        let totals = calculate_project_totals(&data, &cfg, false);
+        let totals = calculate_project_totals(&data, &cfg, false, Some(current_year()));
         let expected = 2.0 * cfg.overtime_rate_weekday() + 4.0 * cfg.overtime_rate_weekend();
         assert!((totals[0].amount_pln - expected).abs() < 1e-6);
         assert_eq!(totals[0].b2b_hours, 0.0);

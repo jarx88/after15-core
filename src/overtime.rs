@@ -1,9 +1,110 @@
-use chrono::{Duration, NaiveDate, NaiveTime};
+use chrono::{Duration, NaiveDate, NaiveTime, TimeZone};
 use chrono_tz::Europe::Warsaw;
 use std::collections::HashMap;
 
 use crate::config::Config;
 use crate::jsonl::Session;
+
+pub fn session_exclusion_key(session: &Session, date: NaiveDate) -> String {
+    let midnight = |date: NaiveDate| {
+        Warsaw
+            .from_local_datetime(&date.and_hms_opt(0, 0, 0).unwrap())
+            .single()
+            .unwrap()
+            .naive_utc()
+    };
+    let start = session.start_time.max(midnight(date));
+    let end = session.end_time.min(midnight(date.succ_opt().unwrap()));
+    format!(
+        "{}→{}",
+        start.and_utc().to_rfc3339(),
+        end.and_utc().to_rfc3339()
+    )
+}
+
+pub fn session_exclusion_range(
+    date: NaiveDate,
+    key: &str,
+) -> Option<(chrono::NaiveDateTime, chrono::NaiveDateTime)> {
+    let (start, end) = key.split_once('→')?;
+    if start.contains('T') || end.contains('T') {
+        let start = chrono::DateTime::parse_from_rfc3339(start)
+            .ok()?
+            .with_timezone(&Warsaw);
+        let next_midnight = date.succ_opt()?.and_hms_opt(0, 0, 0)?;
+        let end = if end == "*" {
+            Warsaw.from_local_datetime(&next_midnight).single()?
+        } else {
+            chrono::DateTime::parse_from_rfc3339(end)
+                .ok()?
+                .with_timezone(&Warsaw)
+        };
+        return (end > start
+            && start.date_naive() == date
+            && (end.date_naive() == date || end.naive_local() == next_midnight))
+            .then_some((start.naive_utc(), end.naive_utc()));
+    }
+    let parse = |value: &str| {
+        NaiveTime::parse_from_str(value, "%H:%M:%S%.f")
+            .or_else(|_| NaiveTime::parse_from_str(value, "%H:%M"))
+    };
+    let start = parse(start).ok()?;
+    let midnight = date.succ_opt()?.and_hms_opt(0, 0, 0)?;
+    let end = if end == "24:00" {
+        midnight
+    } else {
+        let time = parse(end).ok()?;
+        let local = date.and_time(time);
+        if end.len() == 5 {
+            (local + Duration::minutes(1)).min(midnight)
+        } else {
+            local
+        }
+    };
+    let start = Warsaw
+        .from_local_datetime(&date.and_time(start))
+        .earliest()?;
+    let end = Warsaw.from_local_datetime(&end).latest()?;
+    let (start, end) = (start.naive_utc(), end.naive_utc());
+    (end > start).then_some((start, end))
+}
+
+pub fn exclude_session_ranges(
+    session: &Session,
+    exclusions: &[(NaiveDate, String)],
+) -> Vec<Session> {
+    let mut parts = vec![session.clone()];
+    for (date, key) in exclusions {
+        let Some((start, end)) = session_exclusion_range(*date, key) else {
+            continue;
+        };
+        if key.ends_with("→*") && !(session.start_time <= start && start < session.end_time) {
+            continue;
+        }
+        parts = parts
+            .into_iter()
+            .flat_map(|part| {
+                if end <= part.start_time || start >= part.end_time {
+                    return vec![part];
+                }
+                [
+                    (part.start_time, start.min(part.end_time)),
+                    (end.max(part.start_time), part.end_time),
+                ]
+                .into_iter()
+                .filter(|(start, end)| end > start)
+                .map(|(start_time, end_time)| Session {
+                    start_time,
+                    end_time,
+                    duration_seconds: (end_time - start_time).num_seconds(),
+                    ..part.clone()
+                })
+                .collect()
+            })
+            .collect();
+    }
+    parts
+}
 
 pub fn calculate_session_overtime(
     session: &Session,
@@ -149,6 +250,127 @@ fn calculate_overtime_for_day(
 mod tests {
     use super::*;
     use crate::config::{Config, WorkWindowOverride};
+
+    #[test]
+    fn exclusions_keep_new_tail_and_segments_without_minimum_duration() {
+        let date = NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();
+        let session = Session {
+            id: String::new(),
+            project: "proj".into(),
+            project_counts: HashMap::from([("proj".into(), 4)]),
+            start_time: date.and_hms_opt(14, 0, 0).unwrap(),
+            end_time: date.and_hms_opt(15, 2, 0).unwrap(),
+            duration_seconds: 3720,
+            has_claude: true,
+            has_codex: false,
+        };
+        let parts = exclude_session_ranges(
+            &session,
+            &[
+                (date, "16:00:00→16:40:00".into()),
+                (date, "16:30:00→17:00:00".into()),
+            ],
+        );
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].start_time, date.and_hms_opt(15, 0, 0).unwrap());
+        assert_eq!(parts[0].duration_seconds, 120);
+        assert_eq!(parts[0].project_counts, session.project_counts);
+        let later = Session {
+            start_time: date.and_hms_opt(16, 0, 0).unwrap(),
+            end_time: date.and_hms_opt(17, 0, 0).unwrap(),
+            ..session
+        };
+        assert_eq!(
+            exclude_session_ranges(&later, &[(date, "16:00:00→17:00:00".into())])[0].start_time,
+            later.start_time
+        );
+    }
+
+    #[test]
+    fn anchored_exclusion_follows_growth_but_keeps_next_session() {
+        let date = NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();
+        let session = Session {
+            id: String::new(),
+            project: "proj".into(),
+            project_counts: HashMap::new(),
+            start_time: date.and_hms_opt(14, 0, 0).unwrap(),
+            end_time: date.and_hms_opt(16, 0, 0).unwrap(),
+            duration_seconds: 7200,
+            has_claude: true,
+            has_codex: false,
+        };
+        let exclusions = [(date, "2026-09-08T14:00:00+00:00→*".into())];
+        assert!(exclude_session_ranges(&session, &exclusions).is_empty());
+        let later = Session {
+            start_time: date.and_hms_opt(17, 0, 0).unwrap(),
+            end_time: date.and_hms_opt(18, 0, 0).unwrap(),
+            duration_seconds: 3600,
+            ..session
+        };
+        assert_eq!(
+            exclude_session_ranges(&later, &exclusions)[0].start_time,
+            later.start_time
+        );
+    }
+
+    #[test]
+    fn exact_exclusion_does_not_remove_repeated_dst_hour() {
+        let date = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+        let session = Session {
+            id: String::new(),
+            project: "proj".into(),
+            project_counts: HashMap::new(),
+            start_time: date.and_hms_opt(0, 10, 0).unwrap(),
+            end_time: date.and_hms_opt(0, 20, 0).unwrap(),
+            duration_seconds: 600,
+            has_claude: true,
+            has_codex: false,
+        };
+        let key = session_exclusion_key(&session, date);
+        let later = Session {
+            start_time: session.start_time + Duration::hours(1),
+            end_time: session.end_time + Duration::hours(1),
+            ..session.clone()
+        };
+        assert_eq!(
+            exclude_session_ranges(&later, &[(date, key.clone())]).len(),
+            1
+        );
+        assert!(exclude_session_ranges(&session, &[(date, key.clone())]).is_empty());
+        assert!(session_exclusion_range(date.succ_opt().unwrap(), &key).is_none());
+    }
+
+    #[test]
+    fn exclusions_support_legacy_minutes_exact_fractions_and_midnight() {
+        let date = NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();
+        let mut session = Session {
+            id: String::new(),
+            project: "proj".into(),
+            project_counts: HashMap::new(),
+            start_time: date.and_hms_milli_opt(21, 59, 30, 125).unwrap(),
+            end_time: date.and_hms_opt(22, 2, 0).unwrap(),
+            duration_seconds: 149,
+            has_claude: true,
+            has_codex: false,
+        };
+        assert_eq!(
+            session_exclusion_key(&session, date),
+            "2026-09-08T21:59:30.125+00:00→2026-09-08T22:00:00+00:00"
+        );
+        let parts = exclude_session_ranges(&session, &[(date, "23:59→23:59".into())]);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].start_time, date.and_hms_opt(22, 0, 0).unwrap());
+        session.end_time = date.and_hms_milli_opt(21, 59, 50, 250).unwrap();
+        let key = session_exclusion_key(&session, date);
+        assert_eq!(
+            key,
+            "2026-09-08T21:59:30.125+00:00→2026-09-08T21:59:50.250+00:00"
+        );
+        assert!(exclude_session_ranges(&session, &[(date, key)]).is_empty());
+        assert!(
+            exclude_session_ranges(&session, &[(date, "23:59:30.125→24:00".into())]).is_empty()
+        );
+    }
 
     fn config_with_override(date: NaiveDate, start: NaiveTime, end: NaiveTime) -> Config {
         Config {

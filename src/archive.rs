@@ -387,6 +387,19 @@ pub fn recalc_months(summary: &mut DailySummaryFile) {
     }
 }
 
+pub fn session_exclusions() -> Vec<(NaiveDate, String)> {
+    load_summary()
+        .days
+        .into_iter()
+        .flat_map(|(key, day)| {
+            let date = NaiveDate::parse_from_str(&key, "%Y-%m-%d").ok();
+            day.excluded_sessions
+                .into_iter()
+                .filter_map(move |key| date.map(|date| (date, key)))
+        })
+        .collect()
+}
+
 pub fn archive_overtime(
     daily_hours: &HashMap<NaiveDate, f64>,
     daily_projects: &HashMap<NaiveDate, HashMap<String, ProjectHours>>,
@@ -411,7 +424,7 @@ pub fn archive_overtime(
         let should_update = match existing {
             None => true,
             Some(entry) if entry.manual_override => false,
-            Some(entry) => !entry.processed || entry.hours == 0.0,
+            Some(entry) => !entry.processed || entry.hours == 0.0 || !entry.excluded_sessions.is_empty(),
         };
 
         if !should_update {
@@ -441,6 +454,10 @@ pub fn archive_overtime(
             processed: true,
             manual_override: false,
             projects: projects_entry,
+            note: existing.and_then(|entry| entry.note.clone()),
+            excluded_sessions: existing
+                .map(|entry| entry.excluded_sessions.clone())
+                .unwrap_or_default(),
             ..Default::default()
         };
 

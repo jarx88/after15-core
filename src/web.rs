@@ -45,6 +45,12 @@ pub fn router() -> Router {
         .route("/api/rebuild", post(rebuild))
         .route("/api/shift", axum::routing::put(put_shift))
         .route("/api/projects", get(get_projects))
+        .route(
+            "/api/settlements",
+            get(get_settlements).post(post_settlement),
+        )
+        .route("/api/settlements/{id}", axum::routing::put(put_settlement))
+        .route("/api/settlements/import", post(import_settlements))
         .route("/api/months", get(get_months))
         .route("/api/report/{file}", get(get_pdf))
         .route("/api/invoice/{month}", get(get_invoice))
@@ -106,6 +112,179 @@ fn parse_month(value: &str) -> Result<NaiveDate, ApiError> {
 
 fn today() -> NaiveDate {
     Utc::now().with_timezone(&Warsaw).date_naive()
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Settlements {
+    entries: Vec<Settlement>,
+    legacy_imported: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Settlement {
+    id: u64,
+    #[serde(flatten)]
+    payment: SettlementInput,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SettlementInput {
+    amount_grosz: i64,
+    note: String,
+    date: String,
+}
+
+impl SettlementInput {
+    fn validate(&self) -> Result<(), ApiError> {
+        if !(1..=100_000_000_000).contains(&self.amount_grosz) {
+            return Err(bad_request(
+                "kwota w groszach",
+                &self.amount_grosz.to_string(),
+            ));
+        }
+        if self.note.chars().count() > 2000 {
+            return Err(bad_request("opis", "maksymalnie 2000 znaków"));
+        }
+        let date = parse_date(&self.date)?;
+        if date.format("%Y-%m-%d").to_string() != self.date {
+            return Err(bad_request("format daty", &self.date));
+        }
+        Ok(())
+    }
+}
+
+fn settlements_path() -> Result<std::path::PathBuf, ApiError> {
+    dirs::data_dir()
+        .map(|dir| dir.join("claude-overtime/settlements.json"))
+        .ok_or_else(|| internal("Nie można ustalić katalogu rozliczeń".into()))
+}
+
+fn load_settlements(path: &std::path::Path) -> Result<Settlements, ApiError> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Settlements::default());
+        }
+        Err(error) => return Err(internal(error.to_string())),
+    };
+    let ledger: Settlements =
+        serde_json::from_slice(&bytes).map_err(|e| internal(e.to_string()))?;
+    let mut ids = std::collections::HashSet::new();
+    for entry in &ledger.entries {
+        entry
+            .payment
+            .validate()
+            .map_err(|(_, message)| internal(message))?;
+        if entry.id == 0 || !ids.insert(entry.id) {
+            return Err(internal(
+                "Uszkodzona historia rozliczeń: identyfikatory".into(),
+            ));
+        }
+    }
+    Ok(ledger)
+}
+
+async fn get_settlements() -> Result<Json<Settlements>, ApiError> {
+    tokio::task::spawn_blocking(|| load_settlements(&settlements_path()?).map(Json))
+        .await
+        .map_err(join_error)?
+}
+
+async fn mutate_settlements<F>(operation: F) -> Result<Json<Settlements>, ApiError>
+where
+    F: FnOnce(&mut Settlements) -> Result<(), ApiError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        use fs2::FileExt;
+        use std::io::Write;
+        let path = settlements_path()?;
+        let directory = path.parent().unwrap();
+        fs::create_dir_all(directory).map_err(|e| internal(e.to_string()))?;
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path.with_extension("lock"))
+            .map_err(|e| internal(e.to_string()))?;
+        lock.lock_exclusive().map_err(|e| internal(e.to_string()))?;
+        let mut ledger = load_settlements(&path)?;
+        operation(&mut ledger)?;
+        let bytes = serde_json::to_vec_pretty(&ledger).map_err(|e| internal(e.to_string()))?;
+        let temporary = path.with_extension("tmp");
+        let mut file = fs::File::create(&temporary).map_err(|e| internal(e.to_string()))?;
+        file.write_all(&bytes)
+            .map_err(|e| internal(e.to_string()))?;
+        file.sync_all().map_err(|e| internal(e.to_string()))?;
+        fs::rename(&temporary, &path).map_err(|e| internal(e.to_string()))?;
+        fs::File::open(directory)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|e| internal(e.to_string()))?;
+        Ok(Json(ledger))
+    })
+    .await
+    .map_err(join_error)?
+}
+
+fn add_settlement(ledger: &mut Settlements, payment: SettlementInput) -> Result<(), ApiError> {
+    payment.validate()?;
+    let id = ledger
+        .entries
+        .iter()
+        .map(|entry| entry.id)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| internal("Brak wolnych identyfikatorów rozliczeń".into()))?;
+    ledger.entries.push(Settlement { id, payment });
+    Ok(())
+}
+
+async fn post_settlement(
+    Json(payment): Json<SettlementInput>,
+) -> Result<Json<Settlements>, ApiError> {
+    mutate_settlements(move |ledger| add_settlement(ledger, payment)).await
+}
+
+async fn put_settlement(
+    Path(id): Path<u64>,
+    Json(payment): Json<SettlementInput>,
+) -> Result<Json<Settlements>, ApiError> {
+    payment.validate()?;
+    mutate_settlements(move |ledger| {
+        let entry = ledger
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == id)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "Nie znaleziono rozliczenia".into()))?;
+        entry.payment = payment;
+        Ok(())
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct SettlementImport {
+    amount_grosz: i64,
+}
+
+async fn import_settlements(
+    Json(input): Json<SettlementImport>,
+) -> Result<Json<Settlements>, ApiError> {
+    mutate_settlements(move |ledger| {
+        if !ledger.legacy_imported {
+            add_settlement(
+                ledger,
+                SettlementInput {
+                    amount_grosz: input.amount_grosz,
+                    note: "Rozliczenia sprzed wprowadzenia historii".into(),
+                    date: today().format("%Y-%m-%d").to_string(),
+                },
+            )?;
+            ledger.legacy_imported = true;
+        }
+        Ok(())
+    })
+    .await
 }
 
 fn project_hours(entry: &archive::ProjectHoursEntry) -> jsonl::ProjectHours {
@@ -221,8 +400,17 @@ fn month_day_data(
     config: &config::Config,
 ) -> Vec<(NaiveDate, f64, HashMap<String, jsonl::ProjectHours>)> {
     let archived = summary_projects(summary);
-    let live = (first.year() == today().year() && first.month() == today().month())
-        .then(|| cached_compute_day(today(), config));
+    let live = (first.year() == today().year() && first.month() == today().month()).then(|| {
+        computed_with_exclusions(
+            today(),
+            config,
+            summary
+                .days
+                .get(&today().to_string())
+                .map(|d| d.excluded_sessions.as_slice())
+                .unwrap_or(&[]),
+        )
+    });
     let mut days = Vec::new();
     let mut date = first;
     while date.month() == first.month() {
@@ -376,6 +564,8 @@ struct SessionProject {
 
 #[derive(Serialize, Clone)]
 struct DaySession {
+    key: String,
+    excluded: bool,
     start: String,
     end: String,
     duration_s: i64,
@@ -409,6 +599,7 @@ struct ComputedDay {
     hours: f64,
     projects: HashMap<String, jsonl::ProjectHours>,
     sessions: Vec<DaySession>,
+    raw_sessions: Vec<jsonl::Session>,
 }
 
 pub fn clip_session_to_date(session: &jsonl::Session, date: NaiveDate) -> Option<jsonl::Session> {
@@ -483,11 +674,56 @@ fn cached_compute_day(date: NaiveDate, config: &config::Config) -> ComputedDay {
 }
 
 fn compute_day(date: NaiveDate, config: &config::Config) -> ComputedDay {
-    let mut result = ComputedDay::default();
-    for session in jsonl::load_sessions_for_date(date, config, false) {
+    compute_sessions(
+        date,
+        config,
+        jsonl::load_sessions_for_date(date, config, false),
+        &[],
+    )
+}
+
+fn computed_with_exclusions(
+    date: NaiveDate,
+    config: &config::Config,
+    excluded: &[String],
+) -> ComputedDay {
+    let raw = cached_compute_day(date, config);
+    if excluded.is_empty() {
+        return raw;
+    }
+    compute_sessions(date, config, raw.raw_sessions, excluded)
+}
+
+fn compute_sessions(
+    date: NaiveDate,
+    config: &config::Config,
+    sessions: Vec<jsonl::Session>,
+    excluded: &[String],
+) -> ComputedDay {
+    let mut result = ComputedDay {
+        raw_sessions: sessions.clone(),
+        ..Default::default()
+    };
+    let ranges: Vec<_> = excluded.iter().map(|key| (date, key.clone())).collect();
+    let mut parts = Vec::new();
+    for session in sessions {
         let Some(clipped) = clip_session_to_date(&session, date) else {
             continue;
         };
+        let retained = overtime::exclude_session_ranges(&clipped, &ranges);
+        let retained_ranges: Vec<_> = retained
+            .iter()
+            .map(|part| (date, overtime::session_exclusion_key(part, date)))
+            .collect();
+        parts.extend(
+            overtime::exclude_session_ranges(&clipped, &retained_ranges)
+                .into_iter()
+                .map(|part| (part, true)),
+        );
+        parts.extend(retained.into_iter().map(|part| (part, false)));
+    }
+    parts.sort_by_key(|(session, _)| session.start_time);
+    for (clipped, excluded) in parts {
         let overtime_h = overtime::calculate_session_overtime(&clipped, date, config, false)
             .get(&date)
             .copied()
@@ -497,19 +733,23 @@ fn compute_day(date: NaiveDate, config: &config::Config) -> ComputedDay {
             .copied()
             .unwrap_or(0.0);
         let projects = session_projects(&clipped, &config.projects.tracked_path);
-        for project in &projects {
-            let entry = result.projects.entry(project.name.clone()).or_default();
-            if schedule::is_weekend(date) {
-                entry.weekend_hours += overtime_h * project.share;
-            } else {
-                entry.weekday_hours += overtime_h * project.share;
+        if !excluded {
+            for project in &projects {
+                let entry = result.projects.entry(project.name.clone()).or_default();
+                if schedule::is_weekend(date) {
+                    entry.weekend_hours += overtime_h * project.share;
+                } else {
+                    entry.weekday_hours += overtime_h * project.share;
+                }
+                entry.regular_hours += regular_h * project.share;
             }
-            entry.regular_hours += regular_h * project.share;
+            result.hours += overtime_h;
         }
-        result.hours += overtime_h;
         let start = clipped.start_time.and_utc().with_timezone(&Warsaw);
         let end = clipped.end_time.and_utc().with_timezone(&Warsaw);
         result.sessions.push(DaySession {
+            key: overtime::session_exclusion_key(&clipped, date),
+            excluded,
             start: start.format("%H:%M").to_string(),
             end: if end.date_naive() > date {
                 "24:00".to_string()
@@ -542,7 +782,13 @@ async fn get_day(
 fn day_response(date: NaiveDate, config: &config::Config) -> Result<Json<DayResponse>, ApiError> {
     let summary = archive::load_summary_checked().map_err(internal)?;
     let stored = summary.days.get(&date.to_string());
-    let computed = cached_compute_day(date, config);
+    let computed = computed_with_exclusions(
+        date,
+        config,
+        stored
+            .map(|d| d.excluded_sessions.as_slice())
+            .unwrap_or(&[]),
+    );
     let window = config.effective_work_window(date);
     Ok(Json(DayResponse {
         date: date.to_string(),
@@ -565,7 +811,7 @@ fn day_response(date: NaiveDate, config: &config::Config) -> Result<Json<DayResp
 
 #[derive(Deserialize)]
 struct HoursInput {
-    hours: String,
+    hours: Option<String>,
     #[serde(default)]
     exclude_session: Option<String>,
 }
@@ -576,7 +822,35 @@ async fn put_day(
     Json(input): Json<HoursInput>,
 ) -> Result<Json<DayResponse>, ApiError> {
     let date = parse_date(&date)?;
-    let hours = crate::tui::state::parse_hours(&input.hours)
+    if let Some(mut exclusion) = input.exclude_session {
+        if overtime::session_exclusion_range(date, &exclusion).is_none() {
+            return Err(bad_request("przedział wykluczenia", &exclusion));
+        }
+        return mutate_day(state, date, move |summary, config| {
+            // Older clients send minute labels; store exact bounds whenever still available.
+            if let Some(session) = cached_compute_day(date, config)
+                .sessions
+                .iter()
+                .find(|s| format!("{}→{}", s.start, s.end) == exclusion)
+            {
+                exclusion = session.key.clone();
+            }
+            // Anchor to the selected segment so a still-running segment stays excluded.
+            let (start, _) = overtime::session_exclusion_range(date, &exclusion).unwrap();
+            exclusion = format!("{}→*", start.and_utc().to_rfc3339());
+            let entry = summary
+                .days
+                .entry(date.to_string())
+                .or_insert_with(|| archive::day_entry(date, 0.0, None, false, config));
+            if !entry.excluded_sessions.contains(&exclusion) {
+                entry.excluded_sessions.push(exclusion);
+            }
+            store_computed_day(summary, date, config);
+            Ok(())
+        })
+        .await;
+    }
+    let hours = crate::tui::state::parse_hours(input.hours.as_deref().unwrap_or(""))
         .map_err(|e| (StatusCode::UNPROCESSABLE_ENTITY, e))?;
     mutate_day(state, date, move |summary, config| {
         let key = date.to_string();
@@ -588,14 +862,31 @@ async fn put_day(
         entry.formatted = archive::format_hm(hours);
         entry.processed = true;
         entry.manual_override = true;
-        if let Some(key) = input.exclude_session {
-            if !entry.excluded_sessions.contains(&key) {
-                entry.excluded_sessions.push(key);
-            }
-        }
         Ok(())
     })
     .await
+}
+
+fn store_computed_day(
+    summary: &mut archive::DailySummaryFile,
+    date: NaiveDate,
+    config: &config::Config,
+) {
+    let previous = summary.days.get(&date.to_string());
+    let exclusions = previous
+        .map(|d| d.excluded_sessions.clone())
+        .unwrap_or_default();
+    let computed = computed_with_exclusions(date, config, &exclusions);
+    let mut entry = archive::day_entry(
+        date,
+        computed.hours,
+        Some(&computed.projects),
+        false,
+        config,
+    );
+    entry.note = previous.and_then(|d| d.note.clone());
+    entry.excluded_sessions = exclusions;
+    summary.days.insert(date.to_string(), entry);
 }
 
 async fn delete_override(
@@ -604,17 +895,7 @@ async fn delete_override(
 ) -> Result<Json<DayResponse>, ApiError> {
     let date = parse_date(&date)?;
     mutate_day(state, date, move |summary, config| {
-        let computed = cached_compute_day(date, config);
-        summary.days.insert(
-            date.to_string(),
-            archive::day_entry(
-                date,
-                computed.hours,
-                Some(&computed.projects),
-                false,
-                config,
-            ),
-        );
+        store_computed_day(summary, date, config);
         Ok(())
     })
     .await
@@ -627,19 +908,7 @@ async fn lock_day(
     let date = parse_date(&date)?;
     mutate_day(state, date, move |summary, config| {
         let key = date.to_string();
-        if !summary.days.contains_key(&key) {
-            let computed = cached_compute_day(date, config);
-            summary.days.insert(
-                key.clone(),
-                archive::day_entry(
-                    date,
-                    computed.hours,
-                    Some(&computed.projects),
-                    false,
-                    config,
-                ),
-            );
-        }
+        store_computed_day(summary, date, config);
         summary.days.get_mut(&key).unwrap().manual_override = true;
         Ok(())
     })
@@ -1243,7 +1512,10 @@ async fn get_projects(
         let summary = archive::load_summary_checked().map_err(internal)?;
         let full = mode == "all";
         let config = state.config();
-        let totals = crate::calculate_project_totals(&summary_projects(&summary), &config, full);
+        let mut projects = summary_projects(&summary);
+        let wallet_start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        projects.retain(|date, _| *date >= wallet_start);
+        let totals = crate::calculate_project_totals(&projects, &config, full, None);
         let values: Vec<_> = totals
             .into_iter()
             .map(|project| {
