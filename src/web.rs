@@ -154,6 +154,7 @@ fn summary_projects(
 #[derive(Serialize)]
 struct MonthProject {
     name: String,
+    display_hours: f64,
     weekday_hours: f64,
     weekend_hours: f64,
     regular_hours: f64,
@@ -255,6 +256,7 @@ fn month_project_rows(
         let name = report::normalize_project_name(name, tracked_path);
         let row = merged.entry(name.clone()).or_insert(MonthProject {
             name,
+            display_hours: 0.0,
             weekday_hours: 0.0,
             weekend_hours: 0.0,
             regular_hours: 0.0,
@@ -272,6 +274,7 @@ fn month_project_rows(
     if b2b && rest > 0.0001 {
         rows.push(MonthProject {
             name: UNASSIGNED.to_string(),
+            display_hours: 0.0,
             weekday_hours: if weekend { 0.0 } else { rest },
             weekend_hours: if weekend { rest } else { 0.0 },
             regular_hours: 0.0,
@@ -281,8 +284,21 @@ fn month_project_rows(
     rows.sort_by(|a, b| {
         (b.weekday_hours + b.weekend_hours + b.regular_hours)
             .total_cmp(&(a.weekday_hours + a.weekend_hours + a.regular_hours))
+            .then_with(|| a.name.cmp(&b.name))
     });
+    // Round cumulative minutes so project labels add up to the displayed day.
+    let mut minutes: f64 = 0.0;
+    for row in &mut rows {
+        let previous = minutes.round();
+        minutes += (row.weekday_hours + row.weekend_hours) * 60.0;
+        row.display_hours = (minutes.round() - previous) / 60.0;
+    }
     rows
+}
+
+fn format_month_total(hours: impl Iterator<Item = f64>) -> String {
+    // Sum the displayed daily minutes; keep raw hours for billing.
+    archive::format_hm(hours.map(|h| (h * 60.0).round()).sum::<f64>() / 60.0)
 }
 
 async fn get_month(
@@ -334,7 +350,7 @@ async fn get_month(
         Ok(Json(MonthResponse {
             days_count: days.iter().filter(|day| day.hours > 0.0).count(),
             total_hours,
-            total_formatted: archive::format_hm(total_hours),
+            total_formatted: format_month_total(days.iter().map(|day| day.hours)),
             average_hours,
             average_formatted: archive::format_hm(average_hours),
             average_months,
@@ -1342,13 +1358,20 @@ pub fn invoice_rows(
     days: &[(NaiveDate, f64, HashMap<String, jsonl::ProjectHours>)],
     config: &config::Config,
 ) -> Vec<pdf::InvoiceRow> {
-    let mut hours: HashMap<String, f64> = HashMap::new();
+    let mut hours: HashMap<String, (f64, f64)> = HashMap::new();
     for (date, day_hours, projects) in days {
         if !config.is_b2b(*date) {
             continue;
         }
-        for (raw_name, entry) in projects {
-            let name = report::normalize_project_name(raw_name, &config.projects.tracked_path);
+        for entry in month_project_rows(
+            projects,
+            *day_hours,
+            config.day_rate(*date),
+            schedule::is_weekend(*date),
+            true,
+            &config.projects.tracked_path,
+        ) {
+            let name = entry.name;
             if config.projects.excluded_projects.contains(&name) {
                 continue;
             }
@@ -1356,18 +1379,17 @@ pub fn invoice_rows(
             if value < 0.0001 {
                 continue;
             }
-            *hours.entry(name).or_default() += value;
-        }
-        let rest = unassigned_hours(*day_hours, projects);
-        if rest > 0.0001 {
-            *hours.entry(UNASSIGNED.to_string()).or_default() += rest;
+            let total = hours.entry(name).or_default();
+            total.0 += value;
+            total.1 += entry.display_hours;
         }
     }
     let mut rows: Vec<_> = hours
         .into_iter()
-        .map(|(project, hours)| pdf::InvoiceRow {
+        .map(|(project, (hours, display_hours))| pdf::InvoiceRow {
             project,
-            hours: archive::round2(hours),
+            hours,
+            display_hours,
             amount: archive::round2(hours * config.billing.hourly_net),
             summary: None,
         })
@@ -1462,6 +1484,7 @@ fn invoice_data(
 struct InvoiceRowResponse {
     project: String,
     hours: f64,
+    display_hours: f64,
     amount: f64,
     summary: Option<String>,
 }
@@ -1475,12 +1498,13 @@ fn invoice_response(
     serde_json::json!({
         "month": month,
         "hourly_net": config.billing.hourly_net,
-        "total_hours": archive::round2(rows.iter().map(|r| r.hours).sum()),
+        "total_hours": rows.iter().map(|r| r.hours).sum::<f64>(),
+        "display_hours": rows.iter().map(|r| r.display_hours).sum::<f64>(),
         "total_amount": archive::round2(rows.iter().map(|r| r.amount).sum()),
         "errors": errors,
         "projects": rows
             .into_iter()
-            .map(|r| InvoiceRowResponse { project: r.project, hours: r.hours, amount: r.amount, summary: r.summary })
+            .map(|r| InvoiceRowResponse { project: r.project, hours: r.hours, display_hours: r.display_hours, amount: r.amount, summary: r.summary })
             .collect::<Vec<_>>(),
     })
 }
@@ -1547,7 +1571,9 @@ async fn put_invoice_summary(
             .ok_or_else(|| bad_request("projekt — brak commitów w tym miesiącu", &input.project))?;
         let fingerprint = git_fingerprint(std::slice::from_ref(project), author);
         store_git_summary(invoice_key(&month, &input.project), fingerprint, &summary);
-        Ok(Json(serde_json::json!({"project": input.project, "summary": summary})))
+        Ok(Json(
+            serde_json::json!({"project": input.project, "summary": summary}),
+        ))
     })
     .await
     .map_err(join_error)?
@@ -1665,6 +1691,99 @@ fn join_error(error: tokio::task::JoinError) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::git_summary_error;
+
+    #[test]
+    fn report_and_invoice_share_daily_minutes_without_changing_amounts() {
+        use super::*;
+        let config: config::Config =
+            serde_json::from_str(r#"{"billing":{"b2b_from":"2026-09-02"}}"#).unwrap();
+        let days: Vec<_> = [
+            (1, 1.68),
+            (2, 3.43),
+            (6, 4.0),
+            (7, 5.18),
+            (8, 5.83),
+            (9, 0.9675),
+        ]
+        .into_iter()
+        .map(|(day, hours)| {
+            (
+                NaiveDate::from_ymd_opt(2026, 9, day).unwrap(),
+                hours,
+                HashMap::from([(
+                    "farmaster2".into(),
+                    jsonl::ProjectHours {
+                        weekday_hours: hours,
+                        ..Default::default()
+                    },
+                )]),
+            )
+        })
+        .collect();
+        let mut report_hours = 0.0;
+        let mut b2b_hours = 0.0;
+        for (date, hours, projects) in &days {
+            let rows = month_project_rows(
+                projects,
+                *hours,
+                config.day_rate(*date),
+                schedule::is_weekend(*date),
+                config.is_b2b(*date),
+                &config.projects.tracked_path,
+            );
+            let displayed: f64 = rows.iter().map(|p| p.display_hours).sum();
+            assert_eq!(archive::format_hm(displayed), archive::format_hm(*hours));
+            report_hours += displayed;
+            if config.is_b2b(*date) {
+                b2b_hours += displayed;
+            }
+        }
+        assert_eq!(archive::format_hm(report_hours), "21:06");
+        assert_eq!(archive::format_hm(b2b_hours), "19:25");
+        let rows = invoice_rows(&days, &config);
+        assert_eq!(rows.len(), 1);
+        assert!((rows[0].hours - 19.4075).abs() < 1e-9);
+        assert_eq!(rows[0].amount, 2717.05);
+        assert_eq!(archive::format_hm(rows[0].display_hours), "19:25");
+        let response = invoice_response("2026-09".into(), rows, vec![], &config);
+        assert_eq!(
+            archive::format_hm(response["display_hours"].as_f64().unwrap()),
+            "19:25"
+        );
+
+        // Two half-minute projects must display one minute in total, not two.
+        let projects = HashMap::from(["alpha", "beta"].map(|name| {
+            (
+                name.into(),
+                jsonl::ProjectHours {
+                    weekday_hours: 0.5 / 60.0,
+                    ..Default::default()
+                },
+            )
+        }));
+        let rows = month_project_rows(
+            &projects,
+            1.0 / 60.0,
+            140.0,
+            false,
+            true,
+            &config.projects.tracked_path,
+        );
+        assert_eq!(rows[0].name, "alpha");
+        assert_eq!(archive::format_hm(rows[0].display_hours), "0:01");
+        assert_eq!(archive::format_hm(rows[1].display_hours), "0:00");
+    }
+
+    #[test]
+    fn month_total_matches_displayed_days() {
+        let hours = [100.6, 206.0, 240.0, 311.0, 350.0, 57.6].map(|m| m / 60.0);
+        assert_eq!(
+            hours.map(crate::archive::format_hm),
+            ["1:41", "3:26", "4:00", "5:11", "5:50", "0:58"]
+        );
+        assert_eq!(super::format_month_total(hours.into_iter()), "21:06");
+        assert_eq!(super::format_month_total(std::iter::empty()), "0:00");
+    }
 
     #[test]
     fn reports_expired_claude_session() {

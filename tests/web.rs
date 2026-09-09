@@ -358,12 +358,14 @@ fn invoice_rows_count_only_b2b_days_and_keep_unassigned_hours() {
             pdf::InvoiceRow {
                 project: "alpha".into(),
                 hours: 5.0,
+                display_hours: 5.0,
                 amount: 700.0,
                 summary: None
             },
             pdf::InvoiceRow {
                 project: "beta".into(),
                 hours: 1.5,
+                display_hours: 1.5,
                 amount: 210.0,
                 summary: None
             },
@@ -371,6 +373,7 @@ fn invoice_rows_count_only_b2b_days_and_keep_unassigned_hours() {
             pdf::InvoiceRow {
                 project: "bez przypisania".into(),
                 hours: 1.5,
+                display_hours: 1.5,
                 amount: 210.0,
                 summary: None
             },

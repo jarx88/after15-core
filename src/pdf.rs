@@ -544,6 +544,7 @@ fn get_output_path(month_name: &str, year: i32) -> PathBuf {
 pub struct InvoiceRow {
     pub project: String,
     pub hours: f64,
+    pub display_hours: f64,
     pub amount: f64,
     pub summary: Option<String>,
 }
@@ -633,7 +634,7 @@ pub fn generate_invoice_attachment(
     );
     y -= header_height + 10.0;
 
-    let total_hours: f64 = rows.iter().map(|row| row.hours).sum();
+    let total_hours: f64 = rows.iter().map(|row| row.display_hours).sum();
     let total_amount: f64 = rows.iter().map(|row| row.amount).sum();
     layer.set_fill_color(Color::Rgb(Rgb::new(
         TEXT_DARK.0,
@@ -643,8 +644,8 @@ pub fn generate_invoice_attachment(
     )));
     layer.use_text(
         &deaccent(&format!(
-            "Razem: {} h x {:.0} PLN/h = {:.2} PLN netto",
-            format_hours(total_hours),
+            "Razem: {} h | stawka {:.0} PLN/h | {:.2} PLN netto",
+            crate::archive::format_hm(total_hours),
             config.billing.hourly_net,
             total_amount
         )),
@@ -681,7 +682,7 @@ pub fn generate_invoice_attachment(
         layer.use_text(
             &deaccent(&format!(
                 "{} h - {:.2} PLN",
-                format_hours(row.hours),
+                crate::archive::format_hm(row.display_hours),
                 row.amount
             )),
             10.0,
