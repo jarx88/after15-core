@@ -1801,13 +1801,9 @@ fn select_invoice_rows(
         .filter_map(|mut row| {
             let hours = *selected.get(&row.project)?;
             let minute_aligned = ((hours * 60.0).round() - hours * 60.0).abs() < 0.000001;
-            if !hours.is_finite()
-                || hours < 0.0
-                || hours > row.display_hours + 0.000001
-                || !minute_aligned
-            {
+            if !hours.is_finite() || hours < 0.0 || hours > 9999.0 || !minute_aligned {
                 return Some(Err(bad_request(
-                    "godziny projektu (H:MM, nie więcej niż wykryto)",
+                    "godziny projektu (H:MM od 0:00 do 9999:00)",
                     &row.project,
                 )));
             }
@@ -2146,6 +2142,14 @@ mod tests {
         .unwrap();
         assert_eq!(full[0].hours, 5.249);
         assert_eq!(full[0].amount, 734.86);
+        let expanded = select_invoice_rows(
+            rows.clone(),
+            &HashMap::from([("alpha".into(), 32.0), ("beta".into(), 0.0)]),
+            140.0,
+        )
+        .unwrap();
+        assert_eq!(expanded[0].display_hours, 32.0);
+        assert_eq!(expanded[0].amount, 4480.0);
         let selected = HashMap::from([("alpha".into(), 1.5), ("beta".into(), 0.0)]);
         let result = select_invoice_rows(rows, &selected, 140.0).unwrap();
         assert_eq!(result.len(), 1);

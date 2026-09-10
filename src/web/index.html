@@ -51,18 +51,18 @@ async function report(){try{let d=S.data=await month(true),p={};d.days.forEach(x
 function invoiceEditor(j){
   let box=$('#report-view .invoice-editor');
   if(!box)return;
-  box.innerHTML=`<div class="section" style="margin-top:14px">Opisy do załącznika FV <span class="subtle invoice-total" style="text-transform:none;letter-spacing:0">· ${hm(j.display_hours)} h · ${Math.round(j.total_amount).toLocaleString('pl-PL')} PLN</span></div>${j.projects.map(p=>`<div class="note-edit invoice-row" data-project="${E(p.project)}"><div class="invoice-meta"><b>${E(p.project)}</b><span class="subtle mono">dostępne: ${hm(p.display_hours)} h</span><label>Do załącznika <input class="invoice-hours" value="${hm(p.display_hours)}" inputmode="numeric" aria-label="Godziny projektu ${E(p.project)}"></label></div><textarea rows="4" maxlength="4000" placeholder="Brak opisu — kliknij „✨ Opisy do FV” albo wpisz ręcznie">${E(p.summary||'')}</textarea><div><button class="ghost inv-save">Zapisz opis</button></div></div>`).join('')}<div class="note">Podaj godziny w formacie H:MM. Wartość 0:00 pomija projekt. Wybór dotyczy tylko pobieranego załącznika.</div>`;
+  box.innerHTML=`<div class="section" style="margin-top:14px">Opisy do załącznika FV <span class="subtle invoice-total" style="text-transform:none;letter-spacing:0">· ${hm(j.display_hours)} h · ${Math.round(j.total_amount).toLocaleString('pl-PL')} PLN</span></div>${j.projects.map(p=>`<div class="note-edit invoice-row" data-project="${E(p.project)}"><div class="invoice-meta"><b>${E(p.project)}</b><span class="subtle mono">wykryto: ${hm(p.display_hours)} h</span><label>Do załącznika <input class="invoice-hours" value="${hm(p.display_hours)}" inputmode="numeric" aria-label="Godziny projektu ${E(p.project)}"></label></div><textarea rows="4" maxlength="4000" placeholder="Brak opisu — kliknij „✨ Opisy do FV” albo wpisz ręcznie">${E(p.summary||'')}</textarea><div><button class="ghost inv-save">Zapisz opis</button></div></div>`).join('')}<div class="note">Podaj dowolną rozliczaną liczbę godzin w formacie H:MM. Wartość 0:00 pomija projekt. Wybór dotyczy tylko pobieranego załącznika.</div>`;
   const values=()=>{
     let selected={},total=0,amount=0;
     for(const row of box.querySelectorAll('.invoice-row')){
       const input=row.querySelector('.invoice-hours'),match=/^(\d+):([0-5]\d)$/.exec(input.value.trim());
-      const project=j.projects.find(p=>p.project===row.dataset.project),max=project.display_hours;
+      const project=j.projects.find(p=>p.project===row.dataset.project),detected=project.display_hours;
       const hours=match?(Number(match[1])*60+Number(match[2]))/60:NaN;
-      const valid=Number.isFinite(hours)&&hours>=0&&hours<=max+0.000001;
-      input.setCustomValidity(valid?'':'Użyj H:MM, od 0:00 do '+hm(max));
+      const valid=Number.isFinite(hours)&&hours>=0&&hours<=9999;
+      input.setCustomValidity(valid?'':'Użyj formatu H:MM');
       if(!valid){input.reportValidity();return null}
       selected[row.dataset.project]=hours;total+=hours;
-      amount+=Math.abs(hours-max)<0.000001?project.amount:hours*j.hourly_net;
+      amount+=Math.abs(hours-detected)<0.000001?project.amount:hours*j.hourly_net;
     }
     box.querySelector('.invoice-total').textContent='· '+hm(total)+' h · '+Math.round(amount).toLocaleString('pl-PL')+' PLN';
     return selected;
