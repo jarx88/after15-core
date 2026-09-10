@@ -51,23 +51,22 @@ async function report(){try{let d=S.data=await month(true),p={};d.days.forEach(x
 function invoiceEditor(j){
   let box=$('#report-view .invoice-editor');
   if(!box)return;
-  box.innerHTML=`<div class="section" style="margin-top:14px">Opisy do załącznika FV <span class="subtle invoice-total" style="text-transform:none;letter-spacing:0">· ${hm(j.display_hours)} h · ${Math.round(j.total_amount).toLocaleString('pl-PL')} PLN</span></div>${j.projects.map(p=>`<div class="note-edit invoice-row" data-project="${E(p.project)}"><div class="invoice-meta"><b>${E(p.project)}</b><span class="subtle mono">wykryto: ${hm(p.display_hours)} h</span><label>Do załącznika <input class="invoice-hours" value="${hm(p.display_hours)}" inputmode="numeric" aria-label="Godziny projektu ${E(p.project)}"></label></div><textarea rows="4" maxlength="4000" placeholder="Brak opisu — kliknij „✨ Opisy do FV” albo wpisz ręcznie">${E(p.summary||'')}</textarea><div><button class="ghost inv-save">Zapisz opis</button></div></div>`).join('')}<div class="note">Podaj dowolną rozliczaną liczbę godzin w formacie H:MM. Wartość 0:00 pomija projekt. Wybór dotyczy tylko pobieranego załącznika.</div>`;
+  box.innerHTML=`<div class="section" style="margin-top:14px">Opis do załącznika FV <span class="subtle invoice-total" style="text-transform:none;letter-spacing:0"></span></div><div class="shift-edit"><label>Projekt do rozliczenia <select class="invoice-project">${j.projects.map(p=>`<option value="${E(p.project)}">${E(p.project)}</option>`).join('')}</select></label></div>${j.projects.map(p=>`<div class="note-edit invoice-row" data-project="${E(p.project)}"><div class="invoice-meta"><b>${E(p.project)}</b><span class="subtle mono">wykryto: ${hm(p.display_hours)} h</span><label>Do załącznika <input class="invoice-hours" value="${hm(p.display_hours)}" inputmode="numeric" aria-label="Godziny projektu ${E(p.project)}"></label></div><textarea rows="4" maxlength="4000" placeholder="Brak opisu — kliknij „✨ Opisy do FV” albo wpisz ręcznie">${E(p.summary||'')}</textarea><div><button class="ghost inv-save">Zapisz opis</button></div></div>`).join('')}<div class="note">Wybierz jeden projekt i podaj rozliczaną liczbę godzin w formacie H:MM. Wybór dotyczy tylko pobieranego załącznika.</div>`;
   const values=()=>{
-    let selected={},total=0,amount=0;
-    for(const row of box.querySelectorAll('.invoice-row')){
-      const input=row.querySelector('.invoice-hours'),match=/^(\d+):([0-5]\d)$/.exec(input.value.trim());
-      const project=j.projects.find(p=>p.project===row.dataset.project),detected=project.display_hours;
-      const hours=match?(Number(match[1])*60+Number(match[2]))/60:NaN;
-      const valid=Number.isFinite(hours)&&hours>=0&&hours<=9999;
-      input.setCustomValidity(valid?'':'Użyj formatu H:MM');
-      if(!valid){input.reportValidity();return null}
-      selected[row.dataset.project]=hours;total+=hours;
-      amount+=Math.abs(hours-detected)<0.000001?project.amount:hours*j.hourly_net;
-    }
-    box.querySelector('.invoice-total').textContent='· '+hm(total)+' h · '+Math.round(amount).toLocaleString('pl-PL')+' PLN';
-    return selected;
+    const projectName=box.querySelector('.invoice-project').value;
+    const row=[...box.querySelectorAll('.invoice-row')].find(row=>row.dataset.project===projectName);
+    box.querySelectorAll('.invoice-row').forEach(other=>other.classList.toggle('hidden',other!==row));
+    const input=row.querySelector('.invoice-hours'),match=/^(\d+):([0-5]\d)$/.exec(input.value.trim());
+    const project=j.projects.find(p=>p.project===projectName),hours=match?(Number(match[1])*60+Number(match[2]))/60:NaN;
+    const valid=Number.isFinite(hours)&&hours>=0&&hours<=9999;
+    input.setCustomValidity(valid?'':'Użyj formatu H:MM');
+    if(!valid){input.reportValidity();return null}
+    const amount=Math.abs(hours-project.display_hours)<0.000001?project.amount:hours*j.hourly_net;
+    box.querySelector('.invoice-total').textContent='· '+hm(hours)+' h · '+Math.round(amount).toLocaleString('pl-PL')+' PLN';
+    return {[projectName]:hours};
   };
   box.querySelectorAll('.invoice-hours').forEach(input=>input.onchange=values);
+  box.querySelector('.invoice-project').onchange=values;
   values();
   box.querySelectorAll('.inv-save').forEach(b=>b.onclick=async()=>{
     let row=b.closest('.invoice-row'),summary=row.querySelector('textarea').value;

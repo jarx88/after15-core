@@ -2150,7 +2150,7 @@ mod tests {
         .unwrap();
         assert_eq!(expanded[0].display_hours, 32.0);
         assert_eq!(expanded[0].amount, 4480.0);
-        let selected = HashMap::from([("alpha".into(), 1.5), ("beta".into(), 0.0)]);
+        let selected = HashMap::from([("alpha".into(), 1.5)]);
         let result = select_invoice_rows(rows, &selected, 140.0).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].hours, 1.5);
