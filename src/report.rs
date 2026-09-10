@@ -410,13 +410,14 @@ pub fn normalize_project_name(raw_name: &str, tracked_path: &str) -> String {
     let name = short
         .split_once("--claude-worktrees-")
         .map(|(project, _)| project)
-        .unwrap_or(&short);
+        .unwrap_or(&short)
+        .replace('_', "-");
     if name.is_empty() {
         return "Inne".to_string();
     }
     let base = dirs::home_dir().map(|h| h.join(tracked_path));
-    base.map(|b| resolve_worktree_root(&b, name))
-        .unwrap_or_else(|| name.to_string())
+    base.map(|b| resolve_worktree_root(&b, &name))
+        .unwrap_or(name)
 }
 
 /// Katalog projektu, uwzględniając nazwę z Claude (`_` zamienione na `-`).
@@ -593,6 +594,10 @@ mod tests {
         assert_eq!(
             normalize_project_name("-home-jarek-Programowanie-farmaster2", "Programowanie"),
             "farmaster2"
+        );
+        assert_eq!(
+            normalize_project_name("Eksozycja_apteki", "Programowanie"),
+            "Eksozycja-apteki"
         );
     }
 }

@@ -1004,6 +1004,11 @@ fn collect_git_range(
         // their commits via --all, so only real `.git` dirs count.
         .filter(|path| path.join(".git").is_dir())
         .filter_map(|path| repo_commits(path, from, to, author, time_format))
+        .map(|mut project| {
+            project.project =
+                report::normalize_project_name(&project.project, &config.projects.tracked_path);
+            project
+        })
         .collect();
     projects.sort_by(|a, b| a.project.cmp(&b.project));
     projects.dedup_by(|a, b| a.project == b.project);
@@ -1781,6 +1786,44 @@ fn invoice_response(
     })
 }
 
+fn select_invoice_rows(
+    rows: Vec<pdf::InvoiceRow>,
+    selected: &HashMap<String, f64>,
+    hourly_net: f64,
+) -> Result<Vec<pdf::InvoiceRow>, ApiError> {
+    if let Some(project) = selected
+        .keys()
+        .find(|project| !rows.iter().any(|row| row.project == project.as_str()))
+    {
+        return Err(bad_request("projekt", project));
+    }
+    rows.into_iter()
+        .filter_map(|mut row| {
+            let hours = *selected.get(&row.project)?;
+            let minute_aligned = ((hours * 60.0).round() - hours * 60.0).abs() < 0.000001;
+            if !hours.is_finite()
+                || hours < 0.0
+                || hours > row.display_hours + 0.000001
+                || !minute_aligned
+            {
+                return Some(Err(bad_request(
+                    "godziny projektu (H:MM, nie więcej niż wykryto)",
+                    &row.project,
+                )));
+            }
+            if hours < 0.000001 {
+                return None;
+            }
+            if (hours - row.display_hours).abs() > 0.000001 {
+                row.hours = hours;
+                row.display_hours = hours;
+                row.amount = archive::round2(hours * hourly_net);
+            }
+            Some(Ok(row))
+        })
+        .collect()
+}
+
 async fn get_invoice_summaries(
     State(state): State<AppState>,
     Path(month): Path<String>,
@@ -1853,14 +1896,25 @@ async fn put_invoice_summary(
 
 /// PDF zalacznika. Czyta wylacznie zapisane podsumowania — generowanie idzie przez POST,
 /// zeby otwarcie PDF-u nie odpalalo (platnego) claude CLI.
+#[derive(Deserialize, Default)]
+struct InvoiceQuery {
+    hours: Option<String>,
+}
+
 async fn get_invoice(
     State(state): State<AppState>,
     Path(month): Path<String>,
+    Query(query): Query<InvoiceQuery>,
 ) -> Result<Response, ApiError> {
     let first = parse_month(&month)?;
     tokio::task::spawn_blocking(move || {
         let config = state.config();
-        let (rows, _) = invoice_data(&month, first, &config, false)?;
+        let (mut rows, _) = invoice_data(&month, first, &config, false)?;
+        if let Some(hours) = query.hours {
+            let selected: HashMap<String, f64> = serde_json::from_str(&hours)
+                .map_err(|_| bad_request("godziny projektów", &hours))?;
+            rows = select_invoice_rows(rows, &selected, config.billing.hourly_net)?;
+        }
         if rows.is_empty() {
             return Err(bad_request("miesiąc — brak godzin B2B", &month));
         }
@@ -2063,5 +2117,41 @@ mod tests {
             git_summary_error("Failed to authenticate: OAuth session expired")
                 .starts_with("Sesja Claude wygasła")
         );
+    }
+
+    #[test]
+    fn invoice_selection_uses_declared_project_hours() {
+        use super::*;
+        let rows = vec![
+            pdf::InvoiceRow {
+                project: "alpha".into(),
+                hours: 5.249,
+                display_hours: 5.25,
+                amount: 734.86,
+                summary: Some("Opis alpha".into()),
+            },
+            pdf::InvoiceRow {
+                project: "beta".into(),
+                hours: 2.0,
+                display_hours: 2.0,
+                amount: 280.0,
+                summary: Some("Opis beta".into()),
+            },
+        ];
+        let full = select_invoice_rows(
+            rows.clone(),
+            &HashMap::from([("alpha".into(), 5.25), ("beta".into(), 2.0)]),
+            140.0,
+        )
+        .unwrap();
+        assert_eq!(full[0].hours, 5.249);
+        assert_eq!(full[0].amount, 734.86);
+        let selected = HashMap::from([("alpha".into(), 1.5), ("beta".into(), 0.0)]);
+        let result = select_invoice_rows(rows, &selected, 140.0).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].hours, 1.5);
+        assert_eq!(result[0].display_hours, 1.5);
+        assert_eq!(result[0].amount, 210.0);
+        assert_eq!(result[0].summary.as_deref(), Some("Opis alpha"));
     }
 }
