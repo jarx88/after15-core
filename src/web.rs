@@ -60,6 +60,7 @@ pub fn router() -> Router {
                 .post(post_invoice_summaries)
                 .put(put_invoice_summary),
         )
+        .route("/api/invoice/{month}/settled", post(post_invoice_settled))
         .with_state(AppState {
             config: Arc::new(std::sync::RwLock::new(config::load_config())),
             mutation: Arc::new(Mutex::new(())),
@@ -1062,6 +1063,50 @@ fn save_git_summaries(map: &HashMap<String, (u64, String)>) {
     }
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+struct InvoiceHistoryEntry {
+    month: String,
+    project: String,
+    hours: f64,
+    summary: String,
+    settled_at: String,
+}
+
+fn invoice_history_path() -> Result<std::path::PathBuf, ApiError> {
+    dirs::data_dir()
+        .or_else(|| dirs::home_dir().map(|p| p.join(".local/share")))
+        .map(|p| p.join("claude-overtime/invoice_history.json"))
+        .ok_or_else(|| internal("Brak katalogu danych dla historii faktur".into()))
+}
+
+fn load_invoice_history() -> Result<Vec<InvoiceHistoryEntry>, ApiError> {
+    let path = invoice_history_path()?;
+    match fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content)
+            .map_err(|e| internal(format!("Nie można odczytać historii faktur: {e}"))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(internal(format!("Nie można odczytać historii faktur: {e}"))),
+    }
+}
+
+fn save_invoice_history(entries: &[InvoiceHistoryEntry]) -> Result<(), ApiError> {
+    let path = invoice_history_path()?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| internal("Nieprawidłowa ścieżka historii faktur".into()))?;
+    fs::create_dir_all(parent)
+        .map_err(|e| internal(format!("Nie można utworzyć katalogu historii faktur: {e}")))?;
+    let temporary = path.with_extension("json.tmp");
+    let content = serde_json::to_vec_pretty(entries)
+        .map_err(|e| internal(format!("Nie można zapisać historii faktur: {e}")))?;
+    fs::write(&temporary, content)
+        .and_then(|_| fs::rename(&temporary, &path))
+        .map_err(|e| internal(format!("Nie można zapisać historii faktur: {e}")))
+}
+
+static INVOICE_HISTORY_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(Default::default);
+
 /// Zapas: claude CLI (subscription auth) z małym Haiku, gdy Codex zawiedzie.
 /// --strict-mcp-config i --setting-sources '' są nośne: bez nich każde wywołanie startuje
 /// wszystkie serwery MCP, hooki i pluginy z ~/.claude (~5,7 s CPU i ~324 MB zamiast ~0,9 s),
@@ -1685,6 +1730,34 @@ fn invoice_key(month: &str, project: &str) -> String {
     format!("invoice4:{month}:{project}")
 }
 
+fn summary_was_settled(history: &[InvoiceHistoryEntry], project: &str, summary: &str) -> bool {
+    history
+        .iter()
+        .any(|entry| entry.project == project && entry.summary.trim() == summary.trim())
+}
+
+fn append_settled_summaries(prompt: &mut String, history: &[InvoiceHistoryEntry], project: &str) {
+    let used: Vec<_> = history
+        .iter()
+        .filter(|entry| entry.project == project)
+        .collect();
+    if used.is_empty() {
+        return;
+    }
+    prompt.push_str(
+        "\nPoniższe opisy zostały już użyte w poprzednich załącznikach. Nie opisuj ponownie \
+         tych samych prac ani ich parafrazy. Wybierz wyłącznie inne prace z listy commitów:\n",
+    );
+    for entry in used {
+        prompt.push_str(&format!(
+            "\nRozliczone {} ({} h):\n{}\n",
+            entry.month,
+            archive::format_hm(entry.hours),
+            entry.summary
+        ));
+    }
+}
+
 /// Wiersze faktury z opisami prac. Opis z cache'u tylko przy zgodnym fingerprincie commitow;
 /// `generate = true` dowoluje brakujace przez claude CLI (platne), po jednym repo na raz.
 /// Zwraca tez bledy poszczegolnych repo — jedno padniete nie przerywa reszty.
@@ -1706,6 +1779,7 @@ fn invoice_data(
     let author = config.git_author_for(from);
     let git = collect_git_range(from, to, author, "%Y-%m-%d %H:%M", config)?;
     let stored = load_git_summaries();
+    let history = load_invoice_history()?;
     for row in &mut rows {
         let Some(project) = git.iter().find(|p| p.project == row.project) else {
             continue;
@@ -1713,7 +1787,7 @@ fn invoice_data(
         let key = invoice_key(month, &row.project);
         let fingerprint = git_fingerprint(std::slice::from_ref(project), author);
         if let Some((cached_fp, cached)) = stored.get(&key) {
-            if *cached_fp == fingerprint {
+            if *cached_fp == fingerprint && !summary_was_settled(&history, &row.project, cached) {
                 row.summary = Some(cached.clone());
                 continue;
             }
@@ -1743,11 +1817,19 @@ fn invoice_data(
              widoczny skutek.\n\n",
             row.project
         );
+        append_settled_summaries(&mut prompt, &history, &row.project);
         for commit in &project.commits {
             prompt.push_str(&format!("- {} {}\n", commit.time, commit.subject));
         }
         match run_ai(&prompt) {
             Ok(summary) => {
+                if summary_was_settled(&history, &row.project, &summary) {
+                    errors.push(format!(
+                        "{}: generator powtórzył już rozliczony opis — spróbuj ponownie",
+                        row.project
+                    ));
+                    continue;
+                }
                 store_git_summary(key, fingerprint, &summary);
                 row.summary = Some(summary);
             }
@@ -1800,8 +1882,7 @@ fn select_invoice_rows(
     rows.into_iter()
         .filter_map(|mut row| {
             let hours = *selected.get(&row.project)?;
-            let minute_aligned = ((hours * 60.0).round() - hours * 60.0).abs() < 0.000001;
-            if !hours.is_finite() || hours < 0.0 || hours > 9999.0 || !minute_aligned {
+            if !valid_invoice_hours(hours) {
                 return Some(Err(bad_request(
                     "godziny projektu (H:MM od 0:00 do 9999:00)",
                     &row.project,
@@ -1818,6 +1899,12 @@ fn select_invoice_rows(
             Some(Ok(row))
         })
         .collect()
+}
+
+fn valid_invoice_hours(hours: f64) -> bool {
+    hours.is_finite()
+        && (0.0..=9999.0).contains(&hours)
+        && ((hours * 60.0).round() - hours * 60.0).abs() < 0.000001
 }
 
 async fn get_invoice_summaries(
@@ -1854,6 +1941,73 @@ async fn post_invoice_summaries(
 struct InvoiceSummaryInput {
     project: String,
     summary: String,
+}
+
+#[derive(Deserialize)]
+struct InvoiceSettledInput {
+    project: String,
+    hours: f64,
+    summary: String,
+}
+
+async fn post_invoice_settled(
+    State(state): State<AppState>,
+    Path(month): Path<String>,
+    Json(input): Json<InvoiceSettledInput>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let first = parse_month(&month)?;
+    let project = input.project.trim().to_string();
+    let summary = input.summary.trim().to_string();
+    if project.is_empty() || project.len() > 200 {
+        return Err(bad_request("projekt", &input.project));
+    }
+    if summary.is_empty() || summary.len() > 4000 {
+        return Err(bad_request("opis (1–4000 znaków)", &project));
+    }
+    if input.hours <= 0.0 || !valid_invoice_hours(input.hours) {
+        return Err(bad_request("godziny (H:MM od 0:01 do 9999:00)", &project));
+    }
+    tokio::task::spawn_blocking(move || {
+        let config = state.config();
+        let archived = archive::load_summary_checked().map_err(internal)?;
+        if !invoice_rows(&month_day_data(&archived, first, &config), &config)
+            .iter()
+            .any(|row| row.project == project)
+        {
+            return Err(bad_request(
+                "projekt — brak godzin B2B w tym miesiącu",
+                &project,
+            ));
+        }
+        let _guard = INVOICE_HISTORY_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut history = load_invoice_history()?;
+        let already_saved = history.iter().any(|entry| {
+            entry.month == month
+                && entry.project == project
+                && (entry.hours - input.hours).abs() < 0.000001
+                && entry.summary == summary
+        });
+        if !already_saved {
+            history.push(InvoiceHistoryEntry {
+                month: month.clone(),
+                project: project.clone(),
+                hours: input.hours,
+                summary: summary.clone(),
+                settled_at: Utc::now().to_rfc3339(),
+            });
+            save_invoice_history(&history)?;
+        }
+        Ok(Json(serde_json::json!({
+            "project": project,
+            "hours": input.hours,
+            "summary": summary,
+            "already_saved": already_saved,
+        })))
+    })
+    .await
+    .map_err(join_error)?
 }
 
 /// Ręczna korekta opisu do załącznika. Zapis pod fingerprintem bieżącego zestawu
@@ -2013,6 +2167,32 @@ fn join_error(error: tokio::task::JoinError) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::git_summary_error;
+
+    #[test]
+    fn settled_invoice_descriptions_are_project_scoped() {
+        use super::*;
+        let history = vec![InvoiceHistoryEntry {
+            month: "2026-09".into(),
+            project: "farmaster2".into(),
+            hours: 36.0,
+            summary: "- Raporty: dodano porównania.".into(),
+            settled_at: "2026-09-10T12:00:00Z".into(),
+        }];
+        assert!(summary_was_settled(
+            &history,
+            "farmaster2",
+            "- Raporty: dodano porównania."
+        ));
+        assert!(!summary_was_settled(
+            &history,
+            "inny-projekt",
+            "- Raporty: dodano porównania."
+        ));
+        let mut prompt = String::new();
+        append_settled_summaries(&mut prompt, &history, "farmaster2");
+        assert!(prompt.contains("Nie opisuj ponownie"));
+        assert!(prompt.contains("Rozliczone 2026-09 (36:00 h)"));
+    }
 
     #[test]
     fn report_and_invoice_share_daily_minutes_without_changing_amounts() {

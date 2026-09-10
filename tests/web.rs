@@ -278,6 +278,28 @@ async fn web_contract_and_mutations_are_isolated() {
     assert_eq!(row("alpha").unwrap()["hours"], 4.0);
     assert_eq!(invoice["total_amount"].as_f64().unwrap(), 7.0 * 140.0);
 
+    let settled = json!({
+        "project": "alpha",
+        "hours": 36.0,
+        "summary": "- Raporty: dodano nowe porównania."
+    });
+    let (status, saved) = request(
+        &app,
+        "POST",
+        "/api/invoice/2026-09/settled",
+        Some(settled.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["already_saved"], false);
+    let (_, duplicate) = request(&app, "POST", "/api/invoice/2026-09/settled", Some(settled)).await;
+    assert_eq!(duplicate["already_saved"], true);
+    let history: Value =
+        serde_json::from_slice(&fs::read(data.join("invoice_history.json")).unwrap()).unwrap();
+    assert_eq!(history.as_array().unwrap().len(), 1);
+    assert_eq!(history[0]["project"], "alpha");
+    assert_eq!(history[0]["hours"], 36.0);
+
     // suma faktury = suma dni B2B z widoku miesiaca
     let (_, sept) = request(&app, "GET", "/api/month/2026-09", None).await;
     let b2b_pln: f64 = sept["days"]

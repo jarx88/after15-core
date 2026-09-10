@@ -51,7 +51,7 @@ async function report(){try{let d=S.data=await month(true),p={};d.days.forEach(x
 function invoiceEditor(j){
   let box=$('#report-view .invoice-editor');
   if(!box)return;
-  box.innerHTML=`<div class="section" style="margin-top:14px">Opis do załącznika FV <span class="subtle invoice-total" style="text-transform:none;letter-spacing:0"></span></div><div class="shift-edit"><label>Projekt do rozliczenia <select class="invoice-project">${j.projects.map(p=>`<option value="${E(p.project)}">${E(p.project)}</option>`).join('')}</select></label></div>${j.projects.map(p=>`<div class="note-edit invoice-row" data-project="${E(p.project)}"><div class="invoice-meta"><b>${E(p.project)}</b><span class="subtle mono">wykryto: ${hm(p.display_hours)} h</span><label>Do załącznika <input class="invoice-hours" value="${hm(p.display_hours)}" inputmode="numeric" aria-label="Godziny projektu ${E(p.project)}"></label></div><textarea rows="4" maxlength="4000" placeholder="Brak opisu — kliknij „✨ Opisy do FV” albo wpisz ręcznie">${E(p.summary||'')}</textarea><div><button class="ghost inv-save">Zapisz opis</button></div></div>`).join('')}<div class="note">Wybierz jeden projekt i podaj rozliczaną liczbę godzin w formacie H:MM. Wybór dotyczy tylko pobieranego załącznika.</div>`;
+  box.innerHTML=`<div class="section" style="margin-top:14px">Opis do załącznika FV <span class="subtle invoice-total" style="text-transform:none;letter-spacing:0"></span></div><div class="shift-edit"><label>Projekt do rozliczenia <select class="invoice-project">${j.projects.map(p=>`<option value="${E(p.project)}">${E(p.project)}</option>`).join('')}</select></label></div>${j.projects.map(p=>`<div class="note-edit invoice-row" data-project="${E(p.project)}"><div class="invoice-meta"><b>${E(p.project)}</b><span class="subtle mono">wykryto: ${hm(p.display_hours)} h</span><label>Do załącznika <input class="invoice-hours" value="${hm(p.display_hours)}" inputmode="numeric" aria-label="Godziny projektu ${E(p.project)}"></label></div><textarea rows="4" maxlength="4000" placeholder="Brak opisu — kliknij „✨ Opisy do FV” albo wpisz ręcznie">${E(p.summary||'')}</textarea><div><button class="ghost inv-save">Zapisz opis</button> <button class="ghost inv-settle">Oznacz jako rozliczony</button></div></div>`).join('')}<div class="note">Wybierz jeden projekt i podaj rozliczaną liczbę godzin w formacie H:MM. Po pobraniu załącznika oznacz opis jako rozliczony — następny wygenerowany opis pominie te prace.</div>`;
   const values=()=>{
     const projectName=box.querySelector('.invoice-project').value;
     const row=[...box.querySelectorAll('.invoice-row')].find(row=>row.dataset.project===projectName);
@@ -73,6 +73,20 @@ function invoiceEditor(j){
     b.disabled=true;
     try{await api('/api/invoice/'+S.month+'/summaries',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({project:row.dataset.project,summary})});toast('Zapisano opis: '+row.dataset.project)}
     catch(e){toast(e.message)}
+    b.disabled=false;
+  });
+  box.querySelectorAll('.inv-settle').forEach(b=>b.onclick=async()=>{
+    let row=b.closest('.invoice-row'),selected=values();
+    if(!selected)return;
+    let summary=row.querySelector('textarea').value.trim(),hours=selected[row.dataset.project];
+    if(!summary){toast('Najpierw wpisz lub wygeneruj opis');return}
+    if(!confirm(`Oznaczyć jako rozliczone: ${row.dataset.project}, ${hm(hours)} h?`))return;
+    b.disabled=true;
+    try{
+      await api('/api/invoice/'+S.month+'/settled',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({project:row.dataset.project,hours,summary})});
+      row.querySelector('textarea').value='';
+      toast('Zapisano w historii. Kolejny opis pominie te prace.');
+    }catch(e){toast(e.message)}
     b.disabled=false;
   });
   const download=$('#report-view a[href^="/api/invoice/"]');
