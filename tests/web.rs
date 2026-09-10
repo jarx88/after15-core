@@ -299,6 +299,11 @@ async fn web_contract_and_mutations_are_isolated() {
     assert_eq!(history.as_array().unwrap().len(), 1);
     assert_eq!(history[0]["project"], "alpha");
     assert_eq!(history[0]["hours"], 36.0);
+    let (status, visible_history) =
+        request(&app, "GET", "/api/invoice/2026-09/settled", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(visible_history.as_array().unwrap().len(), 1);
+    assert_eq!(visible_history[0]["summary"], history[0]["summary"]);
 
     // suma faktury = suma dni B2B z widoku miesiaca
     let (_, sept) = request(&app, "GET", "/api/month/2026-09", None).await;

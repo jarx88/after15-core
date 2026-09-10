@@ -60,7 +60,10 @@ pub fn router() -> Router {
                 .post(post_invoice_summaries)
                 .put(put_invoice_summary),
         )
-        .route("/api/invoice/{month}/settled", post(post_invoice_settled))
+        .route(
+            "/api/invoice/{month}/settled",
+            get(get_invoice_settled).post(post_invoice_settled),
+        )
         .with_state(AppState {
             config: Arc::new(std::sync::RwLock::new(config::load_config())),
             mutation: Arc::new(Mutex::new(())),
@@ -1948,6 +1951,23 @@ struct InvoiceSettledInput {
     project: String,
     hours: f64,
     summary: String,
+}
+
+async fn get_invoice_settled(
+    Path(month): Path<String>,
+) -> Result<Json<Vec<InvoiceHistoryEntry>>, ApiError> {
+    parse_month(&month)?;
+    tokio::task::spawn_blocking(move || {
+        Ok(Json(
+            load_invoice_history()?
+                .into_iter()
+                .rev()
+                .filter(|entry| entry.month == month)
+                .collect(),
+        ))
+    })
+    .await
+    .map_err(join_error)?
 }
 
 async fn post_invoice_settled(
