@@ -54,7 +54,22 @@ pub fn router() -> Router {
         .route("/api/months", get(get_months))
         .route("/api/report/{file}", get(get_pdf))
         .route("/api/invoice/history", get(get_invoice_history))
-        .route("/api/invoice/history/pdf", get(get_invoice_history_pdf))
+        .route(
+            "/api/invoice/history/{id}",
+            axum::routing::put(put_invoice_history).delete(delete_invoice_history),
+        )
+        .route(
+            "/api/invoice/history/{id}/restore",
+            post(restore_invoice_history),
+        )
+        .route(
+            "/api/invoice/history/{id}/pdf",
+            get(get_invoice_history_pdf),
+        )
+        .route(
+            "/api/invoice/history/pdf",
+            get(get_invoice_history_pdf_legacy),
+        )
         .route("/api/invoice/{month}", get(get_invoice))
         .route(
             "/api/invoice/{month}/summaries",
@@ -1067,6 +1082,8 @@ fn save_git_summaries(map: &HashMap<String, (u64, String)>) {
 
 #[derive(Clone, Deserialize, Serialize)]
 struct InvoiceHistoryEntry {
+    #[serde(default)]
+    id: u64,
     month: String,
     project: String,
     hours: f64,
@@ -1074,6 +1091,12 @@ struct InvoiceHistoryEntry {
     settled_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hourly_net: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deleted_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    previous_summaries: Vec<String>,
 }
 
 fn invoice_history_path() -> Result<std::path::PathBuf, ApiError> {
@@ -1106,6 +1129,91 @@ fn save_invoice_history(entries: &[InvoiceHistoryEntry]) -> Result<(), ApiError>
     fs::write(&temporary, content)
         .and_then(|_| fs::rename(&temporary, &path))
         .map_err(|e| internal(format!("Nie można zapisać historii faktur: {e}")))
+}
+
+fn ensure_invoice_history_ids(entries: &mut [InvoiceHistoryEntry]) -> bool {
+    let mut next = entries
+        .iter()
+        .map(|entry| entry.id)
+        .max()
+        .unwrap_or_default()
+        .saturating_add(1)
+        .max(Utc::now().timestamp_millis().max(1) as u64);
+    let mut changed = false;
+    for entry in entries.iter_mut().filter(|entry| entry.id == 0) {
+        entry.id = next;
+        next = next.saturating_add(1);
+        changed = true;
+    }
+    changed
+}
+
+fn invoice_attachment_path(id: u64) -> Result<std::path::PathBuf, ApiError> {
+    invoice_history_path().map(|path| {
+        path.parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("invoice_attachments")
+            .join(format!("{id}.pdf"))
+    })
+}
+
+fn write_invoice_attachment(
+    entry: &InvoiceHistoryEntry,
+    config: &config::Config,
+) -> Result<std::path::PathBuf, ApiError> {
+    let destination = invoice_attachment_path(entry.id)?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| internal("Nieprawidłowa ścieżka załącznika FV".into()))?;
+    fs::create_dir_all(parent)
+        .map_err(|e| internal(format!("Nie można utworzyć katalogu załączników FV: {e}")))?;
+    let temporary = destination.with_extension("pdf.tmp");
+    let rate = entry
+        .hourly_net
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+        .unwrap_or(config.billing.hourly_net);
+    let mut snapshot_config = config.clone();
+    snapshot_config.billing.hourly_net = rate;
+    let row = pdf::InvoiceRow {
+        project: entry.project.clone(),
+        hours: entry.hours,
+        display_hours: entry.hours,
+        amount: archive::round2(entry.hours * rate),
+        summary: Some(entry.summary.clone()),
+    };
+    pdf::generate_invoice_attachment_to(&entry.month, &[row], &snapshot_config, temporary.clone())
+        .map_err(internal)?;
+    fs::rename(&temporary, &destination)
+        .map_err(|e| internal(format!("Nie można zapisać załącznika FV: {e}")))?;
+    Ok(destination)
+}
+
+fn validate_invoice_history_fields(
+    month: &str,
+    project: &str,
+    hours: f64,
+    summary: &str,
+    hourly_net: f64,
+) -> Result<(String, String), ApiError> {
+    parse_month(month)?;
+    let project = project.trim().to_string();
+    let summary = summary.trim().to_string();
+    if project.is_empty() || project.len() > 200 {
+        return Err(bad_request("projekt (1–200 znaków)", project.as_str()));
+    }
+    if summary.is_empty() || summary.len() > 4000 {
+        return Err(bad_request("opis (1–4000 znaków)", project.as_str()));
+    }
+    if hours <= 0.0 || !valid_invoice_hours(hours) {
+        return Err(bad_request(
+            "godziny (H:MM od 0:01 do 9999:00)",
+            project.as_str(),
+        ));
+    }
+    if !hourly_net.is_finite() || !(0.01..=1_000_000.0).contains(&hourly_net) {
+        return Err(bad_request("stawka godzinowa", &hourly_net.to_string()));
+    }
+    Ok((project, summary))
 }
 
 static INVOICE_HISTORY_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
@@ -1737,13 +1845,20 @@ fn invoice_key(month: &str, project: &str) -> String {
 fn summary_was_settled(history: &[InvoiceHistoryEntry], project: &str, summary: &str) -> bool {
     history
         .iter()
-        .any(|entry| entry.project == project && entry.summary.trim() == summary.trim())
+        .filter(|entry| entry.deleted_at.is_none() && entry.project == project)
+        .any(|entry| {
+            entry.summary.trim() == summary.trim()
+                || entry
+                    .previous_summaries
+                    .iter()
+                    .any(|previous| previous.trim() == summary.trim())
+        })
 }
 
 fn append_settled_summaries(prompt: &mut String, history: &[InvoiceHistoryEntry], project: &str) {
     let used: Vec<_> = history
         .iter()
-        .filter(|entry| entry.project == project)
+        .filter(|entry| entry.deleted_at.is_none() && entry.project == project)
         .collect();
     if used.is_empty() {
         return;
@@ -1759,6 +1874,9 @@ fn append_settled_summaries(prompt: &mut String, history: &[InvoiceHistoryEntry]
             archive::format_hm(entry.hours),
             entry.summary
         ));
+        for previous in &entry.previous_summaries {
+            prompt.push_str(&format!("Wcześniejsza wersja tego opisu:\n{previous}\n"));
+        }
     }
 }
 
@@ -1954,9 +2072,39 @@ struct InvoiceSettledInput {
     summary: String,
 }
 
-async fn get_invoice_history() -> Result<Json<Vec<InvoiceHistoryEntry>>, ApiError> {
+#[derive(Default, Deserialize)]
+struct InvoiceHistoryQuery {
+    #[serde(default)]
+    include_deleted: bool,
+}
+
+#[derive(Deserialize)]
+struct InvoiceHistoryUpdateInput {
+    month: String,
+    project: String,
+    hours: f64,
+    summary: String,
+    hourly_net: f64,
+}
+
+async fn get_invoice_history(
+    Query(query): Query<InvoiceHistoryQuery>,
+) -> Result<Json<Vec<InvoiceHistoryEntry>>, ApiError> {
     tokio::task::spawn_blocking(move || {
-        Ok(Json(load_invoice_history()?.into_iter().rev().collect()))
+        let _guard = INVOICE_HISTORY_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut history = load_invoice_history()?;
+        if ensure_invoice_history_ids(&mut history) {
+            save_invoice_history(&history)?;
+        }
+        Ok(Json(
+            history
+                .into_iter()
+                .rev()
+                .filter(|entry| query.include_deleted || entry.deleted_at.is_none())
+                .collect(),
+        ))
     })
     .await
     .map_err(join_error)?
@@ -1968,53 +2116,164 @@ struct InvoiceHistoryPdfQuery {
     settled_at: String,
 }
 
+fn invoice_history_pdf_response(
+    entry: InvoiceHistoryEntry,
+    config: &config::Config,
+) -> Result<Response, ApiError> {
+    let path = invoice_attachment_path(entry.id)?;
+    if !path.exists() {
+        write_invoice_attachment(&entry, config)?;
+    }
+    let bytes = fs::read(path).map_err(|e| internal(e.to_string()))?;
+    let project: String = entry
+        .project
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/pdf")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!(
+                "attachment; filename=\"zalacznik_fv_{}_{}_{}.pdf\"",
+                entry.month, project, entry.id
+            ),
+        )
+        .body(Body::from(bytes))
+        .map_err(|e| internal(e.to_string()))
+}
+
 async fn get_invoice_history_pdf(
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+) -> Result<Response, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let _guard = INVOICE_HISTORY_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut history = load_invoice_history()?;
+        if ensure_invoice_history_ids(&mut history) {
+            save_invoice_history(&history)?;
+        }
+        let entry = history
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .ok_or((StatusCode::NOT_FOUND, "Nie znaleziono załącznika FV".into()))?;
+        invoice_history_pdf_response(entry, &state.config())
+    })
+    .await
+    .map_err(join_error)?
+}
+
+async fn get_invoice_history_pdf_legacy(
     State(state): State<AppState>,
     Query(query): Query<InvoiceHistoryPdfQuery>,
 ) -> Result<Response, ApiError> {
     tokio::task::spawn_blocking(move || {
-        let entry = load_invoice_history()?
-            .into_iter()
+        let _guard = INVOICE_HISTORY_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut history = load_invoice_history()?;
+        let migrated = ensure_invoice_history_ids(&mut history);
+        let entry = history
+            .iter()
             .find(|entry| entry.project == query.project && entry.settled_at == query.settled_at)
-            .ok_or_else(|| bad_request("wpis historii faktur", &query.project))?;
-        let mut config = state.config();
-        let rate = entry
-            .hourly_net
-            .filter(|rate| rate.is_finite() && *rate > 0.0)
-            .unwrap_or(config.billing.hourly_net);
-        config.billing.hourly_net = rate;
-        let row = pdf::InvoiceRow {
-            project: entry.project.clone(),
-            hours: entry.hours,
-            display_hours: entry.hours,
-            amount: archive::round2(entry.hours * rate),
-            summary: Some(entry.summary),
-        };
-        let path =
-            pdf::generate_invoice_attachment(&entry.month, &[row], &config).map_err(internal)?;
-        let bytes = fs::read(path).map_err(|e| internal(e.to_string()))?;
-        let project: String = entry
-            .project
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect();
-        let timestamp: String = entry
-            .settled_at
-            .chars()
-            .filter(char::is_ascii_digit)
-            .take(14)
-            .collect();
-        Response::builder()
-            .header(header::CONTENT_TYPE, "application/pdf")
-            .header(
-                header::CONTENT_DISPOSITION,
-                format!(
-                    "attachment; filename=\"zalacznik_fv_{}_{}_{}.pdf\"",
-                    entry.month, project, timestamp
-                ),
-            )
-            .body(Body::from(bytes))
-            .map_err(|e| internal(e.to_string()))
+            .cloned()
+            .ok_or((StatusCode::NOT_FOUND, "Nie znaleziono załącznika FV".into()))?;
+        if migrated {
+            save_invoice_history(&history)?;
+        }
+        invoice_history_pdf_response(entry, &state.config())
+    })
+    .await
+    .map_err(join_error)?
+}
+
+async fn put_invoice_history(
+    State(state): State<AppState>,
+    Path(id): Path<u64>,
+    Json(input): Json<InvoiceHistoryUpdateInput>,
+) -> Result<Json<InvoiceHistoryEntry>, ApiError> {
+    let (project, summary) = validate_invoice_history_fields(
+        &input.month,
+        &input.project,
+        input.hours,
+        &input.summary,
+        input.hourly_net,
+    )?;
+    tokio::task::spawn_blocking(move || {
+        let _guard = INVOICE_HISTORY_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut history = load_invoice_history()?;
+        ensure_invoice_history_ids(&mut history);
+        let entry = history.iter_mut().find(|entry| entry.id == id).ok_or((
+            StatusCode::NOT_FOUND,
+            "Nie znaleziono wpisu historii FV".into(),
+        ))?;
+        if entry.summary != summary && !entry.previous_summaries.contains(&entry.summary) {
+            entry.previous_summaries.push(entry.summary.clone());
+        }
+        entry.month = input.month;
+        entry.project = project;
+        entry.hours = input.hours;
+        entry.summary = summary;
+        entry.hourly_net = Some(input.hourly_net);
+        entry.updated_at = Some(Utc::now().to_rfc3339());
+        let updated = entry.clone();
+        write_invoice_attachment(&updated, &state.config())?;
+        save_invoice_history(&history)?;
+        Ok(Json(updated))
+    })
+    .await
+    .map_err(join_error)?
+}
+
+async fn delete_invoice_history(
+    Path(id): Path<u64>,
+) -> Result<Json<InvoiceHistoryEntry>, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let _guard = INVOICE_HISTORY_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut history = load_invoice_history()?;
+        ensure_invoice_history_ids(&mut history);
+        let entry = history.iter_mut().find(|entry| entry.id == id).ok_or((
+            StatusCode::NOT_FOUND,
+            "Nie znaleziono wpisu historii FV".into(),
+        ))?;
+        if entry.deleted_at.is_none() {
+            let now = Utc::now().to_rfc3339();
+            entry.deleted_at = Some(now.clone());
+            entry.updated_at = Some(now);
+        }
+        let deleted = entry.clone();
+        save_invoice_history(&history)?;
+        Ok(Json(deleted))
+    })
+    .await
+    .map_err(join_error)?
+}
+
+async fn restore_invoice_history(
+    Path(id): Path<u64>,
+) -> Result<Json<InvoiceHistoryEntry>, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let _guard = INVOICE_HISTORY_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut history = load_invoice_history()?;
+        ensure_invoice_history_ids(&mut history);
+        let entry = history.iter_mut().find(|entry| entry.id == id).ok_or((
+            StatusCode::NOT_FOUND,
+            "Nie znaleziono wpisu historii FV".into(),
+        ))?;
+        if entry.deleted_at.take().is_some() {
+            entry.updated_at = Some(Utc::now().to_rfc3339());
+        }
+        let restored = entry.clone();
+        save_invoice_history(&history)?;
+        Ok(Json(restored))
     })
     .await
     .map_err(join_error)?
@@ -2026,19 +2285,15 @@ async fn post_invoice_settled(
     Json(input): Json<InvoiceSettledInput>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let first = parse_month(&month)?;
-    let project = input.project.trim().to_string();
-    let summary = input.summary.trim().to_string();
-    if project.is_empty() || project.len() > 200 {
-        return Err(bad_request("projekt", &input.project));
-    }
-    if summary.is_empty() || summary.len() > 4000 {
-        return Err(bad_request("opis (1–4000 znaków)", &project));
-    }
-    if input.hours <= 0.0 || !valid_invoice_hours(input.hours) {
-        return Err(bad_request("godziny (H:MM od 0:01 do 9999:00)", &project));
-    }
     tokio::task::spawn_blocking(move || {
         let config = state.config();
+        let (project, summary) = validate_invoice_history_fields(
+            &month,
+            &input.project,
+            input.hours,
+            &input.summary,
+            config.billing.hourly_net,
+        )?;
         let archived = archive::load_summary_checked().map_err(internal)?;
         if !invoice_rows(&month_day_data(&archived, first, &config), &config)
             .iter()
@@ -2053,35 +2308,60 @@ async fn post_invoice_settled(
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut history = load_invoice_history()?;
-        let existing = history.iter_mut().find(|entry| {
+        ensure_invoice_history_ids(&mut history);
+        let existing = history.iter().position(|entry| {
             entry.month == month
                 && entry.project == project
                 && (entry.hours - input.hours).abs() < 0.000001
                 && entry.summary == summary
         });
-        let already_saved = existing.is_some();
-        let needs_rate = existing
-            .filter(|entry| entry.hourly_net.is_none())
-            .map(|entry| entry.hourly_net = Some(config.billing.hourly_net))
-            .is_some();
-        if !already_saved {
-            history.push(InvoiceHistoryEntry {
+        let already_saved = existing.is_some_and(|index| history[index].deleted_at.is_none());
+        let mut restored = false;
+        let entry = if let Some(index) = existing {
+            let entry = &mut history[index];
+            if entry.hourly_net.is_none() {
+                entry.hourly_net = Some(config.billing.hourly_net);
+            }
+            if entry.deleted_at.take().is_some() {
+                restored = true;
+                entry.updated_at = Some(Utc::now().to_rfc3339());
+            }
+            entry.clone()
+        } else {
+            let id = history
+                .iter()
+                .map(|entry| entry.id)
+                .max()
+                .unwrap_or_default()
+                .saturating_add(1)
+                .max(Utc::now().timestamp_millis().max(1) as u64);
+            let entry = InvoiceHistoryEntry {
+                id,
                 month: month.clone(),
                 project: project.clone(),
                 hours: input.hours,
                 summary: summary.clone(),
                 settled_at: Utc::now().to_rfc3339(),
                 hourly_net: Some(config.billing.hourly_net),
-            });
+                updated_at: None,
+                deleted_at: None,
+                previous_summaries: Vec::new(),
+            };
+            history.push(entry.clone());
+            entry
+        };
+        let attachment = invoice_attachment_path(entry.id)?;
+        if !attachment.exists() {
+            write_invoice_attachment(&entry, &config)?;
         }
-        if !already_saved || needs_rate {
-            save_invoice_history(&history)?;
-        }
+        save_invoice_history(&history)?;
         Ok(Json(serde_json::json!({
+            "id": entry.id,
             "project": project,
             "hours": input.hours,
             "summary": summary,
             "already_saved": already_saved,
+            "restored": restored,
         })))
     })
     .await
@@ -2250,12 +2530,16 @@ mod tests {
     fn settled_invoice_descriptions_are_project_scoped() {
         use super::*;
         let history = vec![InvoiceHistoryEntry {
+            id: 1,
             month: "2026-09".into(),
             project: "farmaster2".into(),
             hours: 36.0,
             summary: "- Raporty: dodano porównania.".into(),
             settled_at: "2026-09-10T12:00:00Z".into(),
             hourly_net: Some(140.0),
+            updated_at: None,
+            deleted_at: None,
+            previous_summaries: vec!["- Raporty: wcześniejsza wersja.".into()],
         }];
         assert!(summary_was_settled(
             &history,
@@ -2267,10 +2551,23 @@ mod tests {
             "inny-projekt",
             "- Raporty: dodano porównania."
         ));
+        assert!(summary_was_settled(
+            &history,
+            "farmaster2",
+            "- Raporty: wcześniejsza wersja."
+        ));
         let mut prompt = String::new();
         append_settled_summaries(&mut prompt, &history, "farmaster2");
         assert!(prompt.contains("Nie opisuj ponownie"));
         assert!(prompt.contains("Rozliczone 2026-09 (36:00 h)"));
+
+        let mut deleted = history;
+        deleted[0].deleted_at = Some("2026-09-11T12:00:00Z".into());
+        assert!(!summary_was_settled(
+            &deleted,
+            "farmaster2",
+            "- Raporty: dodano porównania."
+        ));
     }
 
     #[test]

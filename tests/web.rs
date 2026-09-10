@@ -292,6 +292,7 @@ async fn web_contract_and_mutations_are_isolated() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(saved["already_saved"], false);
+    let history_id = saved["id"].as_u64().unwrap();
     let (_, duplicate) = request(&app, "POST", "/api/invoice/2026-09/settled", Some(settled)).await;
     assert_eq!(duplicate["already_saved"], true);
     let history: Value =
@@ -299,22 +300,21 @@ async fn web_contract_and_mutations_are_isolated() {
     assert_eq!(history.as_array().unwrap().len(), 1);
     assert_eq!(history[0]["project"], "alpha");
     assert_eq!(history[0]["hours"], 36.0);
+    assert_eq!(history[0]["id"], history_id);
+    assert!(
+        data.join(format!("invoice_attachments/{history_id}.pdf"))
+            .exists()
+    );
     let (status, visible_history) = request(&app, "GET", "/api/invoice/history", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(visible_history.as_array().unwrap().len(), 1);
     assert_eq!(visible_history[0]["summary"], history[0]["summary"]);
     assert_eq!(visible_history[0]["hourly_net"], 140.0);
-    let settled_at = visible_history[0]["settled_at"]
-        .as_str()
-        .unwrap()
-        .replace('+', "%2B");
     let response = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!(
-                    "/api/invoice/history/pdf?project=alpha&settled_at={settled_at}"
-                ))
+                .uri(format!("/api/invoice/history/{history_id}/pdf"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -324,6 +324,65 @@ async fn web_contract_and_mutations_are_isolated() {
     assert_eq!(response.headers()["content-type"], "application/pdf");
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     assert!(bytes.starts_with(b"%PDF"));
+
+    let correction = json!({
+        "month": "2026-08",
+        "project": "alpha poprawiona",
+        "hours": 32.5,
+        "summary": "- Raporty: poprawiono opis rozliczonych prac.",
+        "hourly_net": 150.0
+    });
+    let (status, corrected) = request(
+        &app,
+        "PUT",
+        &format!("/api/invoice/history/{history_id}"),
+        Some(correction.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(corrected["hours"], 32.5);
+    assert_eq!(corrected["previous_summaries"][0], history[0]["summary"]);
+
+    let mut invalid_correction = correction.clone();
+    invalid_correction["hours"] = json!(32.51);
+    let (status, _) = request(
+        &app,
+        "PUT",
+        &format!("/api/invoice/history/{history_id}"),
+        Some(invalid_correction),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, deleted) = request(
+        &app,
+        "DELETE",
+        &format!("/api/invoice/history/{history_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(deleted["deleted_at"].is_string());
+    let (_, active_history) = request(&app, "GET", "/api/invoice/history", None).await;
+    assert!(active_history.as_array().unwrap().is_empty());
+    let (_, history_with_trash) = request(
+        &app,
+        "GET",
+        "/api/invoice/history?include_deleted=true",
+        None,
+    )
+    .await;
+    assert_eq!(history_with_trash.as_array().unwrap().len(), 1);
+
+    let (status, restored) = request(
+        &app,
+        "POST",
+        &format!("/api/invoice/history/{history_id}/restore"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(restored["deleted_at"].is_null());
 
     // suma faktury = suma dni B2B z widoku miesiaca
     let (_, sept) = request(&app, "GET", "/api/month/2026-09", None).await;

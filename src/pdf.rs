@@ -599,6 +599,18 @@ pub fn generate_invoice_attachment(
     rows: &[InvoiceRow],
     config: &Config,
 ) -> Result<PathBuf, String> {
+    let output_path = dirs::home_dir()
+        .unwrap_or_default()
+        .join(format!("zalacznik_fv_{month}.pdf"));
+    generate_invoice_attachment_to(month, rows, config, output_path)
+}
+
+pub fn generate_invoice_attachment_to(
+    month: &str,
+    rows: &[InvoiceRow],
+    config: &Config,
+    output_path: PathBuf,
+) -> Result<PathBuf, String> {
     let (year, month_num) = month
         .split_once('-')
         .and_then(|(y, m)| Some((y.parse::<i32>().ok()?, m.parse::<u32>().ok()?)))
@@ -732,9 +744,6 @@ pub fn generate_invoice_attachment(
         &font_regular,
     );
 
-    let output_path = dirs::home_dir()
-        .unwrap_or_default()
-        .join(format!("zalacznik_fv_{month}.pdf"));
     let file =
         File::create(&output_path).map_err(|e| format!("Nie mozna utworzyc pliku: {}", e))?;
     doc.save(&mut BufWriter::new(file))
