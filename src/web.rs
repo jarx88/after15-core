@@ -53,6 +53,8 @@ pub fn router() -> Router {
         .route("/api/settlements/import", post(import_settlements))
         .route("/api/months", get(get_months))
         .route("/api/report/{file}", get(get_pdf))
+        .route("/api/invoice/history", get(get_invoice_history))
+        .route("/api/invoice/history/pdf", get(get_invoice_history_pdf))
         .route("/api/invoice/{month}", get(get_invoice))
         .route(
             "/api/invoice/{month}/summaries",
@@ -60,10 +62,7 @@ pub fn router() -> Router {
                 .post(post_invoice_summaries)
                 .put(put_invoice_summary),
         )
-        .route(
-            "/api/invoice/{month}/settled",
-            get(get_invoice_settled).post(post_invoice_settled),
-        )
+        .route("/api/invoice/{month}/settled", post(post_invoice_settled))
         .with_state(AppState {
             config: Arc::new(std::sync::RwLock::new(config::load_config())),
             mutation: Arc::new(Mutex::new(())),
@@ -1073,6 +1072,8 @@ struct InvoiceHistoryEntry {
     hours: f64,
     summary: String,
     settled_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hourly_net: Option<f64>,
 }
 
 fn invoice_history_path() -> Result<std::path::PathBuf, ApiError> {
@@ -1953,18 +1954,67 @@ struct InvoiceSettledInput {
     summary: String,
 }
 
-async fn get_invoice_settled(
-    Path(month): Path<String>,
-) -> Result<Json<Vec<InvoiceHistoryEntry>>, ApiError> {
-    parse_month(&month)?;
+async fn get_invoice_history() -> Result<Json<Vec<InvoiceHistoryEntry>>, ApiError> {
     tokio::task::spawn_blocking(move || {
-        Ok(Json(
-            load_invoice_history()?
-                .into_iter()
-                .rev()
-                .filter(|entry| entry.month == month)
-                .collect(),
-        ))
+        Ok(Json(load_invoice_history()?.into_iter().rev().collect()))
+    })
+    .await
+    .map_err(join_error)?
+}
+
+#[derive(Deserialize)]
+struct InvoiceHistoryPdfQuery {
+    project: String,
+    settled_at: String,
+}
+
+async fn get_invoice_history_pdf(
+    State(state): State<AppState>,
+    Query(query): Query<InvoiceHistoryPdfQuery>,
+) -> Result<Response, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        let entry = load_invoice_history()?
+            .into_iter()
+            .find(|entry| entry.project == query.project && entry.settled_at == query.settled_at)
+            .ok_or_else(|| bad_request("wpis historii faktur", &query.project))?;
+        let mut config = state.config();
+        let rate = entry
+            .hourly_net
+            .filter(|rate| rate.is_finite() && *rate > 0.0)
+            .unwrap_or(config.billing.hourly_net);
+        config.billing.hourly_net = rate;
+        let row = pdf::InvoiceRow {
+            project: entry.project.clone(),
+            hours: entry.hours,
+            display_hours: entry.hours,
+            amount: archive::round2(entry.hours * rate),
+            summary: Some(entry.summary),
+        };
+        let path =
+            pdf::generate_invoice_attachment(&entry.month, &[row], &config).map_err(internal)?;
+        let bytes = fs::read(path).map_err(|e| internal(e.to_string()))?;
+        let project: String = entry
+            .project
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let timestamp: String = entry
+            .settled_at
+            .chars()
+            .filter(char::is_ascii_digit)
+            .take(14)
+            .collect();
+        Response::builder()
+            .header(header::CONTENT_TYPE, "application/pdf")
+            .header(
+                header::CONTENT_DISPOSITION,
+                format!(
+                    "attachment; filename=\"zalacznik_fv_{}_{}_{}.pdf\"",
+                    entry.month, project, timestamp
+                ),
+            )
+            .body(Body::from(bytes))
+            .map_err(|e| internal(e.to_string()))
     })
     .await
     .map_err(join_error)?
@@ -2003,12 +2053,17 @@ async fn post_invoice_settled(
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut history = load_invoice_history()?;
-        let already_saved = history.iter().any(|entry| {
+        let existing = history.iter_mut().find(|entry| {
             entry.month == month
                 && entry.project == project
                 && (entry.hours - input.hours).abs() < 0.000001
                 && entry.summary == summary
         });
+        let already_saved = existing.is_some();
+        let needs_rate = existing
+            .filter(|entry| entry.hourly_net.is_none())
+            .map(|entry| entry.hourly_net = Some(config.billing.hourly_net))
+            .is_some();
         if !already_saved {
             history.push(InvoiceHistoryEntry {
                 month: month.clone(),
@@ -2016,7 +2071,10 @@ async fn post_invoice_settled(
                 hours: input.hours,
                 summary: summary.clone(),
                 settled_at: Utc::now().to_rfc3339(),
+                hourly_net: Some(config.billing.hourly_net),
             });
+        }
+        if !already_saved || needs_rate {
             save_invoice_history(&history)?;
         }
         Ok(Json(serde_json::json!({
@@ -2197,6 +2255,7 @@ mod tests {
             hours: 36.0,
             summary: "- Raporty: dodano porównania.".into(),
             settled_at: "2026-09-10T12:00:00Z".into(),
+            hourly_net: Some(140.0),
         }];
         assert!(summary_was_settled(
             &history,

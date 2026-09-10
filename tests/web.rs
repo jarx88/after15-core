@@ -299,11 +299,31 @@ async fn web_contract_and_mutations_are_isolated() {
     assert_eq!(history.as_array().unwrap().len(), 1);
     assert_eq!(history[0]["project"], "alpha");
     assert_eq!(history[0]["hours"], 36.0);
-    let (status, visible_history) =
-        request(&app, "GET", "/api/invoice/2026-09/settled", None).await;
+    let (status, visible_history) = request(&app, "GET", "/api/invoice/history", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(visible_history.as_array().unwrap().len(), 1);
     assert_eq!(visible_history[0]["summary"], history[0]["summary"]);
+    assert_eq!(visible_history[0]["hourly_net"], 140.0);
+    let settled_at = visible_history[0]["settled_at"]
+        .as_str()
+        .unwrap()
+        .replace('+', "%2B");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/invoice/history/pdf?project=alpha&settled_at={settled_at}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "application/pdf");
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(bytes.starts_with(b"%PDF"));
 
     // suma faktury = suma dni B2B z widoku miesiaca
     let (_, sept) = request(&app, "GET", "/api/month/2026-09", None).await;
