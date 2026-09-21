@@ -960,7 +960,6 @@ fn repo_commits(
         // commity uzytkownika, zasmiecalyby podsumowanie AI.
         "--exclude=refs/t3/*".into(),
         "--all".into(),
-        "--no-merges".into(),
         "--since".into(),
         format!("{from} 00:00:00"),
         "--until".into(),
@@ -970,6 +969,10 @@ fn repo_commits(
     ];
     if let Some(author) = author {
         args.push(format!("--author={author}"));
+    } else {
+        // Preserve legacy summaries. With an author filter, PR merges may be
+        // the only commits signed by that author (the work was done by agents).
+        args.push("--no-merges".into());
     }
     let output = std::process::Command::new("git")
         .arg("-C")
