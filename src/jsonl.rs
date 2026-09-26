@@ -1,9 +1,12 @@
 use chrono::{Local, NaiveDate, NaiveDateTime};
 use serde::Deserialize;
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::SystemTime;
 use walkdir::WalkDir;
 
 use crate::config::Config;
@@ -246,6 +249,35 @@ fn files_touching_date(date: NaiveDate, debug: bool) -> Vec<PathBuf> {
     )
 }
 
+/// Granice filtra `files_touching_date`: (najwcześniejsza modyfikacja, granica utworzenia).
+pub(crate) fn touching_date_bounds(date: NaiveDate) -> (SystemTime, SystemTime) {
+    (
+        local_midnight(date - chrono::Duration::days(1)),
+        local_midnight(date + chrono::Duration::days(3)),
+    )
+}
+
+/// Filtr dat na metadanych pliku. Brak czasu (nieobsługiwany przez FS) = brak filtra.
+pub(crate) fn passes_date_filter(
+    modified: Option<SystemTime>,
+    created: Option<SystemTime>,
+    min_modified: Option<SystemTime>,
+    max_created: Option<SystemTime>,
+) -> bool {
+    if let (Some(cutoff), Some(modified)) = (min_modified, modified)
+        && modified < cutoff
+    {
+        return false;
+    }
+    // created() nieobsługiwane na starszych FS → brak filtru (jak dotąd)
+    if let (Some(limit), Some(created)) = (max_created, created)
+        && created >= limit
+    {
+        return false;
+    }
+    true
+}
+
 /// Lokalna północ danego dnia jako `SystemTime` — granice liczymy raz, żeby nie
 /// konwertować stref czasowych dla każdego z ~14 tys. plików w drzewie.
 fn local_midnight(date: NaiveDate) -> std::time::SystemTime {
@@ -262,6 +294,134 @@ fn local_midnight(date: NaiveDate) -> std::time::SystemTime {
     }
 }
 
+const SEARCH_DIRS: [&str; 4] = [
+    ".claude/projects",
+    ".claude/transcripts",
+    ".codex/sessions",
+    ".codex/archived_sessions",
+];
+
+/// Przechodzi drzewa sesji i woła `visit` dla każdego liczonego pliku JSONL.
+fn walk_jsonl_files(mut visit: impl FnMut(walkdir::DirEntry)) {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+
+    for search_dir in SEARCH_DIRS.iter().map(|dir| home.join(dir)) {
+        if !search_dir.exists() {
+            continue;
+        }
+
+        for entry in WalkDir::new(&search_dir)
+            .follow_links(false)
+            .into_iter()
+            // Pliki subagentów i tak odpadają niżej — nie schodzimy do ich
+            // katalogów (to ~40% wszystkich plików w drzewie).
+            .filter_entry(|e| !(e.file_type().is_dir() && e.file_name() == "subagents"))
+            .filter_map(|e| e.ok())
+        {
+            // file_type() pochodzi z readdir — bez dodatkowego stat na wpis
+            if !entry.file_type().is_file() || !is_counted_jsonl(entry.path()) {
+                continue;
+            }
+
+            visit(entry);
+        }
+    }
+}
+
+fn is_counted_jsonl(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "jsonl")
+        && !path.to_string_lossy().contains("/subagents/")
+}
+
+/// Równoległy `walk_jsonl_files` z metadanymi (lstat, jak `DirEntry::metadata`
+/// z walkdir). Zwraca te same pliki w tej samej kolejności: każdy wpis dostaje
+/// klucz z pozycji w readdir kolejnych katalogów, a sortowanie po kluczu
+/// odtwarza preorder WalkDir. Pliki bez metadanych pomija.
+pub(crate) fn scan_jsonl_files() -> Vec<(PathBuf, fs::Metadata)> {
+    struct Queue {
+        dirs: Vec<(PathBuf, Vec<u32>)>,
+        active: usize,
+    }
+
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let queue = Mutex::new(Queue {
+        dirs: (0u32..)
+            .zip(SEARCH_DIRS)
+            .map(|(i, dir)| (home.join(dir), vec![i]))
+            .collect(),
+        active: 0,
+    });
+    let wake = Condvar::new();
+    let found = Mutex::new(Vec::new());
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let (dir, key) = {
+                        let mut queue = queue.lock().unwrap();
+                        loop {
+                            if let Some(task) = queue.dirs.pop() {
+                                queue.active += 1;
+                                break task;
+                            }
+                            if queue.active == 0 {
+                                wake.notify_all();
+                                return;
+                            }
+                            queue = wake.wait(queue).unwrap();
+                        }
+                    };
+
+                    let mut subdirs = Vec::new();
+                    let mut files = Vec::new();
+                    if let Ok(entries) = fs::read_dir(&dir) {
+                        for (i, entry) in (0u32..).zip(entries) {
+                            let Ok(entry) = entry else { continue };
+                            let Ok(file_type) = entry.file_type() else {
+                                continue;
+                            };
+                            let mut entry_key = key.clone();
+                            entry_key.push(i);
+                            if file_type.is_dir() {
+                                if entry.file_name() != "subagents" {
+                                    subdirs.push((entry.path(), entry_key));
+                                }
+                            } else if file_type.is_file() {
+                                let path = entry.path();
+                                if is_counted_jsonl(&path)
+                                    && let Ok(metadata) = entry.metadata()
+                                {
+                                    files.push((entry_key, path, metadata));
+                                }
+                            }
+                        }
+                    }
+
+                    found.lock().unwrap().extend(files);
+                    let mut queue = queue.lock().unwrap();
+                    queue.dirs.extend(subdirs);
+                    queue.active -= 1;
+                    drop(queue);
+                    wake.notify_all();
+                }
+            });
+        }
+    });
+
+    let mut found = found.into_inner().unwrap();
+    found.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    found
+        .into_iter()
+        .map(|(_, path, metadata)| (path, metadata))
+        .collect()
+}
+
 fn find_jsonl_files(
     min_date: Option<NaiveDate>,
     max_birth: Option<NaiveDate>,
@@ -269,68 +429,29 @@ fn find_jsonl_files(
 ) -> Vec<PathBuf> {
     let mut files = Vec::new();
 
-    let Some(home) = dirs::home_dir() else {
-        return files;
-    };
-
-    let search_dirs = [
-        home.join(".claude/projects"),
-        home.join(".claude/transcripts"),
-        home.join(".codex/sessions"),
-        home.join(".codex/archived_sessions"),
-    ];
-
     let min_modified = min_date.map(local_midnight);
     let max_created = max_birth.map(|date| local_midnight(date + chrono::Duration::days(1)));
 
-    for search_dir in &search_dirs {
-        if !search_dir.exists() {
-            continue;
-        }
-
-        for entry in WalkDir::new(search_dir)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            // file_type() pochodzi z readdir — bez dodatkowego stat na wpis
-            if !entry.file_type().is_file() {
-                continue;
-            }
-
-            let path = entry.path();
-
-            if path.extension().map(|e| e != "jsonl").unwrap_or(true) {
-                continue;
-            }
-
-            if path.to_string_lossy().contains("/subagents/") {
-                continue;
-            }
-
-            if min_modified.is_some() || max_created.is_some() {
-                let Ok(metadata) = entry.metadata() else {
-                    continue;
-                };
-                if let (Some(cutoff), Ok(modified)) = (min_modified, metadata.modified()) {
-                    if modified < cutoff {
-                        continue;
-                    }
-                }
-                // created() nieobsługiwane na starszych FS → brak filtru (jak dotąd)
-                if let (Some(limit), Ok(created)) = (max_created, metadata.created()) {
-                    if created >= limit {
-                        continue;
-                    }
-                }
-            }
-
-            files.push(path.to_path_buf());
-            if debug {
-                eprintln!("[DEBUG] Found JSONL: {:?}", path);
+    walk_jsonl_files(|entry| {
+        if min_modified.is_some() || max_created.is_some() {
+            let Ok(metadata) = entry.metadata() else {
+                return;
+            };
+            if !passes_date_filter(
+                metadata.modified().ok(),
+                metadata.created().ok(),
+                min_modified,
+                max_created,
+            ) {
+                return;
             }
         }
-    }
+
+        if debug {
+            eprintln!("[DEBUG] Found JSONL: {:?}", entry.path());
+        }
+        files.push(entry.into_path());
+    });
 
     files
 }
@@ -355,21 +476,32 @@ pub fn load_all_overtime(config: &Config, debug: bool) -> TodayData {
 }
 
 pub fn load_sessions_for_date(date: NaiveDate, config: &Config, debug: bool) -> Vec<Session> {
-    use chrono_tz::Europe::Warsaw;
-
     let files = files_touching_date(date, debug);
 
     let mut all_records = collect_timestamps_parallel(&files);
+    all_records.retain(|r| is_counted_source(config, &r.project));
+    sessions_touching_date(date, all_records)
+}
 
-    if all_records.is_empty() {
+/// Rekord z projektu, który wchodzi do nadgodzin (śledzona ścieżka, nie wykluczony).
+pub(crate) fn is_counted_source(config: &Config, project: &str) -> bool {
+    config.is_tracked_source(project) && !config.is_source_excluded(project)
+}
+
+/// Sesje dotykające `date` z już odfiltrowanych rekordów plików `files_touching_date(date)`.
+pub(crate) fn sessions_touching_date<R: Borrow<TimestampRecord>>(
+    date: NaiveDate,
+    mut records: Vec<R>,
+) -> Vec<Session> {
+    use chrono_tz::Europe::Warsaw;
+
+    if records.is_empty() {
         return Vec::new();
     }
 
-    all_records
-        .retain(|r| config.is_tracked_source(&r.project) && !config.is_source_excluded(&r.project));
-    all_records.sort_by_key(|r| r.timestamp);
+    records.sort_by_key(|r| r.borrow().timestamp);
 
-    let sessions = build_sessions_from_records(&all_records, false);
+    let sessions = build_sessions_from_records(&records, false);
 
     sessions
         .into_iter()
@@ -387,10 +519,12 @@ const SESSION_GAP_SECONDS: i64 = 30 * 60;
 const MIN_SESSION_SECONDS: i64 = 5 * 60;
 
 #[derive(Debug, Clone)]
-struct TimestampRecord {
-    timestamp: NaiveDateTime,
-    project: String,
-    is_codex: bool,
+pub(crate) struct TimestampRecord {
+    pub(crate) timestamp: NaiveDateTime,
+    // Arc: rekordy jednego pliku dzielą nazwę projektu, a cache panelu web
+    // trzyma je w pamięci między żądaniami.
+    pub(crate) project: Arc<str>,
+    pub(crate) is_codex: bool,
 }
 
 fn load_overtime_from_files(
@@ -411,19 +545,13 @@ fn load_overtime_from_files(
         );
     }
 
-    let mut all_records: Vec<TimestampRecord> = Vec::new();
-
-    for file_path in &files {
-        let records = collect_timestamps_from_file(file_path);
-        all_records.extend(records);
-    }
+    let mut all_records = collect_timestamps_parallel(&files);
 
     if all_records.is_empty() {
         return result;
     }
 
-    all_records
-        .retain(|r| config.is_tracked_source(&r.project) && !config.is_source_excluded(&r.project));
+    all_records.retain(|r| is_counted_source(config, &r.project));
     all_records.sort_by_key(|r| r.timestamp);
 
     if debug {
@@ -542,41 +670,29 @@ fn load_overtime_from_files(
     result
 }
 
-/// Cheap change-detector for the JSONL set relevant to `date`: stats files
-/// (no parsing) and hashes (path, len, mtime). Same fingerprint → sessions
-/// for that date cannot have changed.
-pub fn files_fingerprint_for_date(date: NaiveDate) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let files = files_touching_date(date, false);
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for path in &files {
-        path.hash(&mut hasher);
-        if let Ok(meta) = fs::metadata(path) {
-            meta.len().hash(&mut hasher);
-            if let Ok(mtime) = meta.modified() {
-                mtime.hash(&mut hasher);
-            }
-        }
-    }
-    hasher.finish()
-}
-
+/// Parsuje pliki równolegle; wynik w kolejności `files`. Wątki biorą kolejne
+/// pliki z kolejki, więc jeden wielki plik nie blokuje reszty porcji.
 fn collect_timestamps_parallel(files: &[PathBuf]) -> Vec<TimestampRecord> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
         .min(files.len().max(1));
-    let chunk_size = files.len().div_ceil(threads.max(1)).max(1);
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = files
-            .chunks(chunk_size)
-            .map(|chunk| {
-                scope.spawn(move || {
-                    let mut records = Vec::new();
-                    for path in chunk {
-                        records.extend(collect_timestamps_from_file(path));
+    let next = AtomicUsize::new(0);
+    let mut parsed: Vec<(usize, Vec<TimestampRecord>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(path) = files.get(index) else {
+                            break;
+                        };
+                        done.push((index, collect_timestamps_from_file(path)));
                     }
-                    records
+                    done
                 })
             })
             .collect();
@@ -584,78 +700,99 @@ fn collect_timestamps_parallel(files: &[PathBuf]) -> Vec<TimestampRecord> {
             .into_iter()
             .flat_map(|handle| handle.join().unwrap_or_default())
             .collect()
-    })
+    });
+    parsed.sort_unstable_by_key(|(index, _)| *index);
+    parsed.into_iter().flat_map(|(_, records)| records).collect()
 }
 
-fn collect_timestamps_from_file(path: &Path) -> Vec<TimestampRecord> {
-    let mut records = Vec::new();
-
+pub(crate) fn collect_timestamps_from_file(path: &Path) -> Vec<TimestampRecord> {
     let file = match File::open(path) {
         Ok(f) => f,
-        Err(_) => return records,
+        Err(_) => return Vec::new(),
     };
-    let reader = BufReader::new(file);
-    let default_project = extract_project_name(path);
-    let is_transcript = default_project == "transcripts";
-    let is_codex = path.to_string_lossy().contains("/.codex/");
-    let mut codex_project = None;
-    let mut first_user_seen = false;
-    let mut is_t3_metadata_session = false;
+    let mut parser = FileParser::new(path);
+    let records: Vec<_> = BufReader::new(file)
+        .lines()
+        .flatten()
+        .filter_map(|line| parser.parse_line(&line))
+        .collect();
 
-    for line in reader.lines().flatten() {
-        if let Ok(entry) = serde_json::from_str::<JsonlEntry>(&line) {
-            if is_codex
-                && let Some(cwd) = entry
-                    .payload
-                    .as_ref()
-                    .and_then(|payload| payload.cwd.as_deref())
-            {
-                codex_project = extract_project_from_path(cwd);
-            }
-            let entry_type = entry.entry_type.as_deref().unwrap_or("");
-            if !is_codex && entry_type == "user" && !first_user_seen {
-                first_user_seen = true;
-                is_t3_metadata_session = is_t3_metadata_prompt(&line);
-            }
-            match entry_type {
-                "system"
-                | "file-history-snapshot"
-                | "queue-operation"
-                | "custom-title"
-                | "agent-name"
-                | "last-prompt"
-                | "pr-link" => continue,
-                _ => {}
-            }
-
-            if let Some(ref ts_str) = entry.timestamp {
-                if let Some(ts) = parse_timestamp(ts_str) {
-                    let project = if is_codex {
-                        let Some(project) = codex_project.clone() else {
-                            continue;
-                        };
-                        project
-                    } else if is_transcript {
-                        extract_project_from_tool_input(&entry)
-                            .unwrap_or_else(|| default_project.clone())
-                    } else {
-                        default_project.clone()
-                    };
-
-                    records.push(TimestampRecord {
-                        timestamp: ts,
-                        project,
-                        is_codex,
-                    });
-                }
-            }
-        }
-    }
-
-    if is_t3_metadata_session {
+    if parser.is_t3_metadata_session {
         Vec::new()
     } else {
         records
+    }
+}
+
+/// Stan parsowania jednego pliku JSONL między liniami. Pliki sesji są tylko
+/// dopisywane, więc cache panelu web może doczytać nowe linie od zapamiętanego
+/// stanu zamiast parsować cały plik od nowa.
+#[derive(Clone)]
+pub(crate) struct FileParser {
+    pub(crate) default_project: Arc<str>,
+    pub(crate) is_transcript: bool,
+    pub(crate) is_codex: bool,
+    pub(crate) codex_project: Option<Arc<str>>,
+    pub(crate) first_user_seen: bool,
+    /// Pierwszy prompt to generator tytułu/gałęzi t3 — cały plik się nie liczy.
+    pub(crate) is_t3_metadata_session: bool,
+}
+
+impl FileParser {
+    pub(crate) fn new(path: &Path) -> Self {
+        let default_project: Arc<str> = extract_project_name(path).into();
+        FileParser {
+            is_transcript: &*default_project == "transcripts",
+            is_codex: path.to_string_lossy().contains("/.codex/"),
+            default_project,
+            codex_project: None,
+            first_user_seen: false,
+            is_t3_metadata_session: false,
+        }
+    }
+
+    pub(crate) fn parse_line(&mut self, line: &str) -> Option<TimestampRecord> {
+        let entry = serde_json::from_str::<JsonlEntry>(line).ok()?;
+        if self.is_codex
+            && let Some(cwd) = entry
+                .payload
+                .as_ref()
+                .and_then(|payload| payload.cwd.as_deref())
+        {
+            self.codex_project = extract_project_from_path(cwd).map(Arc::from);
+        }
+        let entry_type = entry.entry_type.as_deref().unwrap_or("");
+        if !self.is_codex && entry_type == "user" && !self.first_user_seen {
+            self.first_user_seen = true;
+            self.is_t3_metadata_session = is_t3_metadata_prompt(line);
+        }
+        match entry_type {
+            "system"
+            | "file-history-snapshot"
+            | "queue-operation"
+            | "custom-title"
+            | "agent-name"
+            | "last-prompt"
+            | "pr-link" => return None,
+            _ => {}
+        }
+
+        let timestamp = parse_timestamp(entry.timestamp.as_deref()?)?;
+        let project = if self.is_codex {
+            self.codex_project.clone()?
+        } else if self.is_transcript {
+            extract_project_from_tool_input(&entry)
+                .map(Arc::from)
+                .unwrap_or_else(|| self.default_project.clone())
+        } else {
+            self.default_project.clone()
+        };
+
+        Some(TimestampRecord {
+            timestamp,
+            project,
+            is_codex: self.is_codex,
+        })
     }
 }
 
@@ -673,7 +810,7 @@ fn is_t3_metadata_prompt(line: &str) -> bool {
     )
 }
 
-const PROGRAMOWANIE_DIR: &str = "Programowanie";
+pub(crate) const PROGRAMOWANIE_DIR: &str = "Programowanie";
 const WORKTREE_PATH_MARKER: &str = "/.t3/worktrees/";
 const WORKTREE_DIR_PREFIX: &str = "--t3-worktrees-";
 const WORKTREE_DIR_SUFFIX: &str = "-t3code-";
@@ -742,23 +879,29 @@ fn extract_project_from_path(file_path: &str) -> Option<String> {
     Some(format!("-home-jarek-Programowanie-{}", normalized))
 }
 
-fn build_sessions_from_records(records: &[TimestampRecord], debug: bool) -> Vec<Session> {
+fn build_sessions_from_records<R: Borrow<TimestampRecord>>(
+    records: &[R],
+    debug: bool,
+) -> Vec<Session> {
     let mut sessions = Vec::new();
 
     if records.is_empty() {
         return sessions;
     }
 
-    let mut session_start = records[0].timestamp;
-    let mut session_end = records[0].timestamp;
-    let mut session_projects: HashMap<String, usize> = HashMap::new();
-    session_projects.insert(records[0].project.clone(), 1);
-    let mut session_has_claude = !records[0].is_codex;
-    let mut session_has_codex = records[0].is_codex;
+    let first = records[0].borrow();
+    let mut session_start = first.timestamp;
+    let mut session_end = first.timestamp;
+    // Klucze pożyczone z rekordów: String powstaje raz na sesję, nie na rekord.
+    let mut session_projects: HashMap<&str, usize> = HashMap::new();
+    session_projects.insert(&*first.project, 1);
+    let mut session_has_claude = !first.is_codex;
+    let mut session_has_codex = first.is_codex;
     let mut session_count = 0;
 
-    for i in 1..records.len() {
-        let gap = (records[i].timestamp - session_end).num_seconds();
+    for record in &records[1..] {
+        let record = record.borrow();
+        let gap = (record.timestamp - session_end).num_seconds();
 
         if gap > SESSION_GAP_SECONDS {
             let duration = (session_end - session_start).num_seconds();
@@ -766,13 +909,13 @@ fn build_sessions_from_records(records: &[TimestampRecord], debug: bool) -> Vec<
                 let dominant_project = session_projects
                     .iter()
                     .max_by_key(|(_, count)| *count)
-                    .map(|(proj, _)| proj.clone())
+                    .map(|(proj, _)| proj.to_string())
                     .unwrap_or_else(|| "unknown".to_string());
 
                 sessions.push(Session {
                     id: format!("global-{}", session_count),
                     project: dominant_project,
-                    project_counts: session_projects.clone(),
+                    project_counts: owned_counts(&session_projects),
                     start_time: session_start,
                     end_time: session_end,
                     duration_seconds: duration,
@@ -781,17 +924,15 @@ fn build_sessions_from_records(records: &[TimestampRecord], debug: bool) -> Vec<
                 });
                 session_count += 1;
             }
-            session_start = records[i].timestamp;
+            session_start = record.timestamp;
             session_projects.clear();
             session_has_claude = false;
             session_has_codex = false;
         }
-        session_end = records[i].timestamp;
-        session_has_claude |= !records[i].is_codex;
-        session_has_codex |= records[i].is_codex;
-        *session_projects
-            .entry(records[i].project.clone())
-            .or_insert(0) += 1;
+        session_end = record.timestamp;
+        session_has_claude |= !record.is_codex;
+        session_has_codex |= record.is_codex;
+        *session_projects.entry(&*record.project).or_insert(0) += 1;
     }
 
     let duration = (session_end - session_start).num_seconds();
@@ -799,13 +940,13 @@ fn build_sessions_from_records(records: &[TimestampRecord], debug: bool) -> Vec<
         let dominant_project = session_projects
             .iter()
             .max_by_key(|(_, count)| *count)
-            .map(|(proj, _)| proj.clone())
+            .map(|(proj, _)| proj.to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
         sessions.push(Session {
             id: format!("global-{}", session_count),
             project: dominant_project,
-            project_counts: session_projects.clone(),
+            project_counts: owned_counts(&session_projects),
             start_time: session_start,
             end_time: session_end,
             duration_seconds: duration,
@@ -824,6 +965,13 @@ fn build_sessions_from_records(records: &[TimestampRecord], debug: bool) -> Vec<
     }
 
     sessions
+}
+
+fn owned_counts(counts: &HashMap<&str, usize>) -> HashMap<String, usize> {
+    counts
+        .iter()
+        .map(|(name, count)| (name.to_string(), *count))
+        .collect()
 }
 
 fn parse_timestamp(ts: &str) -> Option<NaiveDateTime> {
@@ -866,7 +1014,7 @@ mod tests {
     fn record(timestamp: &str, project: &str) -> TimestampRecord {
         TimestampRecord {
             timestamp: NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S").unwrap(),
-            project: project.to_string(),
+            project: project.into(),
             is_codex: false,
         }
     }

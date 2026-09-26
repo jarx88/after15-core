@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, net::SocketAddr, sync::Arc};
 use tokio::sync::Mutex;
 
-use crate::{archive, config, jsonl, overtime, pdf, report, schedule};
+use crate::{archive, config, jsonl, jsonl_cache, overtime, pdf, report, schedule};
 
 const INDEX_HTML: &str = include_str!("web/index.html");
 type ApiError = (StatusCode, String);
@@ -100,6 +100,7 @@ pub fn serve(bind: &str) {
             });
         println!("After15 web: http://{address}");
         tokio::spawn(auto_summary_loop());
+        tokio::task::spawn_blocking(warm_caches);
         axum::serve(listener, router()).await.unwrap_or_else(|e| {
             eprintln!("[BŁĄD] Serwer zakończył pracę: {e}");
         });
@@ -590,38 +591,58 @@ async fn get_month_computed(
 ) -> Result<Json<MonthComputedResponse>, ApiError> {
     let first = parse_month(&month)?;
     tokio::task::spawn_blocking(move || {
-        let config = state.config();
         let summary = archive::load_summary_checked().map_err(internal)?;
-        let days = month_day_data(&summary, first, &config);
-        let edited = |date: &NaiveDate| {
-            summary
-                .days
-                .get(&date.to_string())
-                .is_some_and(|day| day.manual_override || !day.excluded_sessions.is_empty())
-        };
-        // Dni bez edycji zostaja z archiwum jak w glownej sumie, wiec roznica to tylko edycje.
-        let hours: Vec<f64> = std::thread::scope(|scope| {
-            let config = &config;
-            let jobs: Vec<_> = days
-                .iter()
-                .map(|(date, hours, _)| {
-                    let job = edited(date)
-                        .then(|| scope.spawn(move || cached_compute_day(*date, config).hours));
-                    (*hours, job)
-                })
-                .collect();
-            jobs.into_iter()
-                .map(|(hours, job)| job.map_or(hours, |job| job.join().unwrap()))
-                .collect()
-        });
-        let total_hours = hours.iter().sum();
-        Ok(Json(MonthComputedResponse {
-            total_hours,
-            total_formatted: format_month_total(hours.into_iter()),
-        }))
+        Ok(Json(month_computed(&summary, first, &state.config())))
     })
     .await
     .map_err(join_error)?
+}
+
+fn month_computed(
+    summary: &archive::DailySummaryFile,
+    first: NaiveDate,
+    config: &config::Config,
+) -> MonthComputedResponse {
+    let days = month_day_data(summary, first, config);
+    let edited = |date: &NaiveDate| {
+        summary
+            .days
+            .get(&date.to_string())
+            .is_some_and(|day| day.manual_override || !day.excluded_sessions.is_empty())
+    };
+    let edited_dates: Vec<NaiveDate> = days.iter().map(|(date, ..)| *date).filter(edited).collect();
+    // Dni miesiąca dzielą duże pliki — parsujemy je raz dla wszystkich dni naraz.
+    jsonl_cache::prefetch(&jsonl_cache::index(JSONL_INDEX_MAX_AGE), &edited_dates);
+    // Dni bez edycji zostaja z archiwum jak w glownej sumie, wiec roznica to tylko edycje.
+    let hours: Vec<f64> = std::thread::scope(|scope| {
+        let jobs: Vec<_> = days
+            .iter()
+            .map(|(date, hours, _)| {
+                let job = edited(date)
+                    .then(|| scope.spawn(move || cached_compute_day(*date, config).hours));
+                (*hours, job)
+            })
+            .collect();
+        jobs.into_iter()
+            .map(|(hours, job)| job.map_or(hours, |job| job.join().unwrap()))
+            .collect()
+    });
+    let total_hours = hours.iter().sum();
+    MonthComputedResponse {
+        total_hours,
+        total_formatted: format_month_total(hours.into_iter()),
+    }
+}
+
+/// Po starcie serwera: wczytuje cache JSONL z dysku i liczy bieżący miesiąc,
+/// żeby pierwsze otwarcie panelu nie czekało na parsowanie.
+fn warm_caches() {
+    let Ok(summary) = archive::load_summary_checked() else {
+        return;
+    };
+    let first = today().with_day(1).unwrap();
+    month_computed(&summary, first, &config::load_config());
+    jsonl_cache::save_if_dirty();
 }
 
 #[derive(Serialize, Clone)]
@@ -726,14 +747,24 @@ fn session_projects(session: &jsonl::Session, tracked_path: &str) -> Vec<Session
 static DAY_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<NaiveDate, (u64, ComputedDay)>>> =
     std::sync::LazyLock::new(Default::default);
 
+/// Jak długo widoki tylko do odczytu korzystają z indeksu plików JSONL bez
+/// ponownego skanu drzewa. Mutacje skanują zawsze, więc widzą stan bieżący.
+const JSONL_INDEX_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn cached_compute_day(date: NaiveDate, config: &config::Config) -> ComputedDay {
-    let fingerprint = jsonl::files_fingerprint_for_date(date);
+    let index = jsonl_cache::index(JSONL_INDEX_MAX_AGE);
+    let fingerprint = index.fingerprint(date);
     if let Some((cached_fp, cached)) = DAY_CACHE.lock().unwrap().get(&date) {
         if *cached_fp == fingerprint {
             return cached.clone();
         }
     }
-    let computed = compute_day(date, config);
+    let computed = compute_sessions(
+        date,
+        config,
+        jsonl_cache::sessions_for_date(&index, date, config),
+        &[],
+    );
     DAY_CACHE
         .lock()
         .unwrap()
@@ -741,13 +772,10 @@ fn cached_compute_day(date: NaiveDate, config: &config::Config) -> ComputedDay {
     computed
 }
 
-fn compute_day(date: NaiveDate, config: &config::Config) -> ComputedDay {
-    compute_sessions(
-        date,
-        config,
-        jsonl::load_sessions_for_date(date, config, false),
-        &[],
-    )
+/// Po rebuildzie i zmianie zmiany wszystko liczymy od nowa.
+fn clear_day_caches(forget_disk: bool) {
+    DAY_CACHE.lock().unwrap().clear();
+    jsonl_cache::clear(forget_disk);
 }
 
 fn computed_with_exclusions(
@@ -849,6 +877,14 @@ async fn get_day(
 
 fn day_response(date: NaiveDate, config: &config::Config) -> Result<Json<DayResponse>, ApiError> {
     let summary = archive::load_summary_checked().map_err(internal)?;
+    Ok(Json(day_payload(&summary, date, config)))
+}
+
+fn day_payload(
+    summary: &archive::DailySummaryFile,
+    date: NaiveDate,
+    config: &config::Config,
+) -> DayResponse {
     let stored = summary.days.get(&date.to_string());
     let computed = computed_with_exclusions(
         date,
@@ -858,7 +894,7 @@ fn day_response(date: NaiveDate, config: &config::Config) -> Result<Json<DayResp
             .unwrap_or(&[]),
     );
     let window = config.effective_work_window(date);
-    Ok(Json(DayResponse {
+    DayResponse {
         date: date.to_string(),
         shift: config.shift_label(date),
         shift_overridden: config.shift_override(date).is_some() && !config.is_b2b(date),
@@ -874,7 +910,7 @@ fn day_response(date: NaiveDate, config: &config::Config) -> Result<Json<DayResp
             .map(|day| day.excluded_sessions.clone())
             .unwrap_or_default(),
         note: stored.and_then(|day| day.note.clone()),
-    }))
+    }
 }
 
 #[derive(Deserialize)]
@@ -1087,12 +1123,22 @@ fn collect_git_range(
         .unwrap_or_default();
     // Repozytoria spoza tracked_path, np. ~/after15-core.
     repos.extend(config.projects.extra_git_paths.iter().map(|p| home.join(p)));
-    let mut projects: Vec<GitProject> = repos
-        .iter()
-        // Linked worktrees have a `.git` FILE — the main repo already lists
-        // their commits via --all, so only real `.git` dirs count.
-        .filter(|path| path.join(".git").is_dir())
-        .filter_map(|path| repo_commits(path, from, to, author, time_format))
+    // Linked worktrees have a `.git` FILE — the main repo already lists
+    // their commits via --all, so only real `.git` dirs count.
+    repos.retain(|path| path.join(".git").is_dir());
+    // `git log` per repo równolegle; wyniki w kolejności repos, jak sekwencyjnie.
+    let found: Vec<Option<GitProject>> = std::thread::scope(|scope| {
+        let jobs: Vec<_> = repos
+            .iter()
+            .map(|path| scope.spawn(move || repo_commits(path, from, to, author, time_format)))
+            .collect();
+        jobs.into_iter()
+            .map(|job| job.join().ok().flatten())
+            .collect()
+    });
+    let mut projects: Vec<GitProject> = found
+        .into_iter()
+        .flatten()
         .map(|mut project| {
             project.project =
                 report::normalize_project_name(&project.project, &config.projects.tracked_path);
@@ -1534,6 +1580,7 @@ async fn auto_summary_loop() {
         if let Ok(Err((_, message))) = task.await {
             eprintln!("[WARN] Auto-podsumowanie {date} nieudane: {message}");
         }
+        let _ = tokio::task::spawn_blocking(jsonl_cache::save_if_dirty).await;
         tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
     }
 }
@@ -1562,7 +1609,7 @@ async fn put_note(
             if note.is_empty() {
                 return Ok(());
             }
-            let computed = compute_day(date, config);
+            let computed = cached_compute_day(date, config);
             summary.days.insert(
                 key.clone(),
                 archive::day_entry(
@@ -1593,12 +1640,14 @@ where
     let _guard = state.mutation.lock().await;
     let config = state.config();
     tokio::task::spawn_blocking(move || {
+        // Akcja ma widzieć bieżące JSONL, nie indeks sprzed kilku sekund.
+        jsonl_cache::index(std::time::Duration::ZERO);
         let _archive_lock = archive::try_lock_archive().ok_or_else(lock_unavailable)?;
         let mut summary = archive::load_summary_checked().map_err(internal)?;
         operation(&mut summary, &config).map_err(internal)?;
         archive::recalc_months(&mut summary);
         archive::save_summary(&summary).map_err(internal)?;
-        day_response(date, &config)
+        Ok(Json(day_payload(&summary, date, &config)))
     })
     .await
     .map_err(join_error)?
@@ -1618,9 +1667,12 @@ async fn rebuild(
     let _guard = mutation.lock().await;
     tokio::task::spawn_blocking(move || {
         let _archive_lock = archive::try_lock_archive().ok_or_else(lock_unavailable)?;
-        crate::rebuild_archive(&state.config(), false, recent_days)
+        let stats = crate::rebuild_archive(&state.config(), false, recent_days)
             .map(Json)
-            .map_err(internal)
+            .map_err(internal);
+        // Pełne „Przelicz z JSONL” odrzuca też zapis cache na dysku.
+        clear_day_caches(recent_days.is_none());
+        stats
     })
     .await
     .map_err(join_error)?
@@ -2571,7 +2623,7 @@ async fn put_shift(
         fs::write(&path, serde_json::to_string_pretty(&root).unwrap())
             .map_err(|e| internal(e.to_string()))?;
         *state.config.write().unwrap() = config::load_config();
-        DAY_CACHE.lock().unwrap().clear();
+        clear_day_caches(false);
         Ok(Json(serde_json::json!({"ok": true})))
     })
     .await
