@@ -106,6 +106,23 @@ pub fn exclude_session_ranges(
     parts
 }
 
+/// Whether the stored exclusion `key` is what removed the excluded segment `start..end`.
+pub fn exclusion_covers_segment(
+    date: NaiveDate,
+    key: &str,
+    start: chrono::NaiveDateTime,
+    end: chrono::NaiveDateTime,
+) -> bool {
+    let Some((from, to)) = session_exclusion_range(date, key) else {
+        return false;
+    };
+    if key.ends_with("→*") {
+        // Anchored keys run to midnight but only cut their own session, from the anchor on.
+        return start <= from && from < end;
+    }
+    from < end && to > start
+}
+
 pub fn calculate_session_overtime(
     session: &Session,
     _filter_date: NaiveDate,
@@ -311,6 +328,31 @@ mod tests {
             exclude_session_ranges(&later, &exclusions)[0].start_time,
             later.start_time
         );
+    }
+
+    #[test]
+    fn restoring_segment_matches_only_its_own_exclusion() {
+        let date = NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();
+        let at = |h, m| date.and_hms_opt(h, m, 0).unwrap();
+        let first = "2026-09-08T14:00:00+00:00→*";
+        let second = "2026-09-08T17:00:00+00:00→*";
+        // The earlier anchor reaches midnight, yet must not be lifted by restoring a later segment.
+        assert!(!exclusion_covers_segment(date, first, at(17, 0), at(18, 0)));
+        assert!(exclusion_covers_segment(date, second, at(17, 0), at(18, 0)));
+        assert!(exclusion_covers_segment(date, first, at(14, 0), at(16, 0)));
+        // Legacy keys are Warsaw wall-clock times (UTC+2 here).
+        assert!(exclusion_covers_segment(
+            date,
+            "18:30:00→19:30:00",
+            at(17, 0),
+            at(18, 0)
+        ));
+        assert!(!exclusion_covers_segment(
+            date,
+            "18:00:00→19:00:00",
+            at(17, 0),
+            at(18, 0)
+        ));
     }
 
     #[test]

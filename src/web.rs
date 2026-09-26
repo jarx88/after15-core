@@ -33,6 +33,7 @@ pub fn router() -> Router {
     Router::new()
         .route("/", get(|| async { Html(INDEX_HTML) }))
         .route("/api/month/{month}", get(get_month))
+        .route("/api/month/{month}/computed", get(get_month_computed))
         .route("/api/day/{date}", get(get_day).put(put_day))
         .route("/api/day/{date}/override", delete(delete_override))
         .route("/api/day/{date}/lock", post(lock_day))
@@ -574,6 +575,55 @@ async fn get_month(
     .map_err(join_error)?
 }
 
+#[derive(Serialize)]
+struct MonthComputedResponse {
+    total_hours: f64,
+    total_formatted: String,
+}
+
+/// Suma miesiaca, jaka wyszlaby bez recznych korekt i wykluczonych segmentow.
+/// Osobny endpoint, bo przeliczenie edytowanych dni z jsonl trwa sekundy,
+/// a kalendarz ma sie pokazywac od razu.
+async fn get_month_computed(
+    State(state): State<AppState>,
+    Path(month): Path<String>,
+) -> Result<Json<MonthComputedResponse>, ApiError> {
+    let first = parse_month(&month)?;
+    tokio::task::spawn_blocking(move || {
+        let config = state.config();
+        let summary = archive::load_summary_checked().map_err(internal)?;
+        let days = month_day_data(&summary, first, &config);
+        let edited = |date: &NaiveDate| {
+            summary
+                .days
+                .get(&date.to_string())
+                .is_some_and(|day| day.manual_override || !day.excluded_sessions.is_empty())
+        };
+        // Dni bez edycji zostaja z archiwum jak w glownej sumie, wiec roznica to tylko edycje.
+        let hours: Vec<f64> = std::thread::scope(|scope| {
+            let config = &config;
+            let jobs: Vec<_> = days
+                .iter()
+                .map(|(date, hours, _)| {
+                    let job = edited(date)
+                        .then(|| scope.spawn(move || cached_compute_day(*date, config).hours));
+                    (*hours, job)
+                })
+                .collect();
+            jobs.into_iter()
+                .map(|(hours, job)| job.map_or(hours, |job| job.join().unwrap()))
+                .collect()
+        });
+        let total_hours = hours.iter().sum();
+        Ok(Json(MonthComputedResponse {
+            total_hours,
+            total_formatted: format_month_total(hours.into_iter()),
+        }))
+    })
+    .await
+    .map_err(join_error)?
+}
+
 #[derive(Serialize, Clone)]
 struct SessionProject {
     name: String,
@@ -672,7 +722,7 @@ fn session_projects(session: &jsonl::Session, tracked_path: &str) -> Vec<Session
     projects
 }
 
-// ponytail: unbounded in-process map — a handful of clicked dates, restart clears it
+// ponytail: unbounded in-process map — clicked dates plus edited days of viewed months, restart clears it
 static DAY_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<NaiveDate, (u64, ComputedDay)>>> =
     std::sync::LazyLock::new(Default::default);
 
@@ -832,6 +882,9 @@ struct HoursInput {
     hours: Option<String>,
     #[serde(default)]
     exclude_session: Option<String>,
+    /// Klucz wykluczonego segmentu z `DaySession.key` — zdejmuje wykluczenia, ktore go wycinaly.
+    #[serde(default)]
+    include_session: Option<String>,
 }
 
 async fn put_day(
@@ -840,6 +893,21 @@ async fn put_day(
     Json(input): Json<HoursInput>,
 ) -> Result<Json<DayResponse>, ApiError> {
     let date = parse_date(&date)?;
+    if let Some(segment) = input.include_session {
+        let Some((start, end)) = overtime::session_exclusion_range(date, &segment) else {
+            return Err(bad_request("segment", &segment));
+        };
+        return mutate_day(state, date, move |summary, config| {
+            if let Some(entry) = summary.days.get_mut(&date.to_string()) {
+                entry
+                    .excluded_sessions
+                    .retain(|key| !overtime::exclusion_covers_segment(date, key, start, end));
+            }
+            store_computed_day(summary, date, config);
+            Ok(())
+        })
+        .await;
+    }
     if let Some(mut exclusion) = input.exclude_session {
         if overtime::session_exclusion_range(date, &exclusion).is_none() {
             return Err(bad_request("przedział wykluczenia", &exclusion));

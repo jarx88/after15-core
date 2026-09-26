@@ -203,5 +203,32 @@ async fn excluding_segment_keeps_counting_later_work() {
         archived.days[&yesterday.to_string()].excluded_sessions,
         ["16:00→17:00"]
     );
+    // Restoring one excluded segment lifts only its own exclusion.
+    let day = call(&app, "GET", &day_url, Value::Null).await;
+    let segment = day["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| {
+            s["excluded"] == true
+                && s["key"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("{date}T16:00"))
+        })
+        .unwrap()["key"]
+        .clone();
+    let restored = call(&app, "PUT", &day_url, json!({"include_session":segment})).await;
+    assert_eq!(restored["computed_hours"], 1.5);
+    assert_eq!(restored["excluded_sessions"].as_array().unwrap().len(), 1);
+    // The unedited total ignores the remaining exclusion as well.
+    let raw = call(
+        &app,
+        "GET",
+        &format!("/api/month/{}/computed", &date[..7]),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(raw["total_hours"], 2.75);
     fs::remove_dir_all(root).unwrap();
 }
