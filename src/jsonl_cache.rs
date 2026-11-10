@@ -553,11 +553,11 @@ fn write_file(out: &mut Writer, path: &Path, parsed: &Parsed) {
     let parser = &parsed.parser;
     let default_project = out.string(&parser.default_project);
     out.u32(default_project);
-    let codex_project = parser
-        .codex_project
+    let cwd_project = parser
+        .cwd_project
         .as_ref()
         .map_or(u32::MAX, |project| out.string(project));
-    out.u32(codex_project);
+    out.u32(cwd_project);
     out.u8(u8::from(parser.is_transcript)
         | u8::from(parser.is_codex) << 1
         | u8::from(parser.first_user_seen) << 2
@@ -709,7 +709,7 @@ fn load_persisted(projects_key: u64) -> Option<HashMap<PathBuf, Slot>> {
         let offset = input.u64()?;
         let tail_check = input.blob()?.to_vec();
         let default_project = string(input.u32()?)?;
-        let codex_project = match input.u32()? {
+        let cwd_project = match input.u32()? {
             u32::MAX => None,
             index => Some(string(index)?),
         };
@@ -718,7 +718,7 @@ fn load_persisted(projects_key: u64) -> Option<HashMap<PathBuf, Slot>> {
             default_project,
             is_transcript: flags & 1 != 0,
             is_codex: flags & 2 != 0,
-            codex_project,
+            cwd_project,
             first_user_seen: flags & 4 != 0,
             is_t3_metadata_session: flags & 8 != 0,
         };

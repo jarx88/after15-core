@@ -37,6 +37,7 @@ struct JsonlEntry {
     #[serde(rename = "type")]
     entry_type: Option<String>,
     tool_input: Option<ToolInput>,
+    cwd: Option<String>,
     // Lekki typ zamiast serde_json::Value: serde przeskakuje resztę payloadu
     // bez budowania drzewa. Przy 5 GB JSONL to różnica rzędu wielkości.
     payload: Option<CodexPayload>,
@@ -732,7 +733,8 @@ pub(crate) struct FileParser {
     pub(crate) default_project: Arc<str>,
     pub(crate) is_transcript: bool,
     pub(crate) is_codex: bool,
-    pub(crate) codex_project: Option<Arc<str>>,
+    /// Projekt z ostatniego `cwd` (Codex i nazwane worktree t3).
+    pub(crate) cwd_project: Option<Arc<str>>,
     pub(crate) first_user_seen: bool,
     /// Pierwszy prompt to generator tytułu/gałęzi t3 — cały plik się nie liczy.
     pub(crate) is_t3_metadata_session: bool,
@@ -745,21 +747,29 @@ impl FileParser {
             is_transcript: &*default_project == "transcripts",
             is_codex: path.to_string_lossy().contains("/.codex/"),
             default_project,
-            codex_project: None,
+            cwd_project: None,
             first_user_seen: false,
             is_t3_metadata_session: false,
         }
     }
 
+    /// Katalog worktree t3 bez `-t3code-` (nazwane worktree, od 2026-10) nie
+    /// daje projektu z nazwy — bierzemy go z `cwd` wpisów.
+    fn is_named_t3_worktree(&self) -> bool {
+        self.default_project.contains(WORKTREE_DIR_PREFIX)
+    }
+
     pub(crate) fn parse_line(&mut self, line: &str) -> Option<TimestampRecord> {
         let entry = serde_json::from_str::<JsonlEntry>(line).ok()?;
-        if self.is_codex
-            && let Some(cwd) = entry
-                .payload
-                .as_ref()
-                .and_then(|payload| payload.cwd.as_deref())
-        {
-            self.codex_project = extract_project_from_path(cwd).map(Arc::from);
+        let cwd = if self.is_codex {
+            entry.payload.as_ref().and_then(|payload| payload.cwd.as_deref())
+        } else if self.is_named_t3_worktree() {
+            entry.cwd.as_deref()
+        } else {
+            None
+        };
+        if let Some(cwd) = cwd {
+            self.cwd_project = extract_project_from_path(cwd).map(Arc::from);
         }
         let entry_type = entry.entry_type.as_deref().unwrap_or("");
         if !self.is_codex && entry_type == "user" && !self.first_user_seen {
@@ -779,7 +789,11 @@ impl FileParser {
 
         let timestamp = parse_timestamp(entry.timestamp.as_deref()?)?;
         let project = if self.is_codex {
-            self.codex_project.clone()?
+            self.cwd_project.clone()?
+        } else if self.is_named_t3_worktree() {
+            self.cwd_project
+                .clone()
+                .unwrap_or_else(|| self.default_project.clone())
         } else if self.is_transcript {
             extract_project_from_tool_input(&entry)
                 .map(Arc::from)
@@ -1105,6 +1119,22 @@ mod tests {
         );
         assert!(!codex_only[0].has_claude);
         assert!(codex_only[0].has_codex);
+    }
+
+    #[test]
+    fn named_t3_worktree_dir_takes_project_from_cwd() {
+        let mut parser = FileParser::new(Path::new(
+            "/home/jarek/.claude/projects/-home-jarek--t3-worktrees-farmaster2-t3-sentry-autopilot/s.jsonl",
+        ));
+        let record = parser
+            .parse_line(r#"{"timestamp":"2026-11-03T09:00:00.000Z","type":"user","cwd":"/home/jarek/Programowanie/farmaster2/frontend"}"#)
+            .unwrap();
+        assert_eq!(&*record.project, "-home-jarek-Programowanie-farmaster2");
+        // Kolejne wpisy bez cwd dziedziczą projekt.
+        let record = parser
+            .parse_line(r#"{"timestamp":"2026-11-03T09:01:00.000Z","type":"assistant"}"#)
+            .unwrap();
+        assert_eq!(&*record.project, "-home-jarek-Programowanie-farmaster2");
     }
 
     #[test]
